@@ -1,0 +1,252 @@
+namespace api.Templates.Email;
+
+// 회원가입 이메일 인증 템플릿
+public class VerificationEmailTemplate : IEmailTemplate
+{
+    private readonly string _verificationCode;
+
+    public string Subject => "이메일 인증 - Riff";
+
+    public VerificationEmailTemplate(string verificationCode)
+    {
+        _verificationCode = verificationCode;
+    }
+
+    public string GenerateHtml()
+    {
+        var verificationCode = _verificationCode;
+        return @$"
+            <!DOCTYPE html>
+            <html lang='ko'>
+            <head>
+                <meta charset='UTF-8'>
+                <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+                <title>Riff 이메일 인증</title>
+                <style>
+                    * {{
+                        margin: 0;
+                        padding: 0;
+                        box-sizing: border-box;
+                    }}
+
+                    body {{
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+                        background: #f5f5f5;
+                        color: #1a1a1a;
+                        line-height: 1.6;
+                        padding: 20px;
+                    }}
+
+                    .container {{
+                        max-width: 600px;
+                        margin: 0 auto;
+                        background: #ffffff;
+                        border-radius: 24px;
+                        overflow: hidden;
+                        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
+                    }}
+
+                    .header {{
+                        text-align: center;
+                        padding: 48px 32px 32px;
+                        background: linear-gradient(135deg, rgba(250, 45, 72, 0.05) 0%, rgba(255, 107, 107, 0.05) 100%);
+                        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+                    }}
+
+                    .logo {{
+                        font-size: 32px;
+                        font-weight: 700;
+                        background: linear-gradient(135deg, #FA2D48, #ff6b6b);
+                        -webkit-background-clip: text;
+                        -webkit-text-fill-color: transparent;
+                        background-clip: text;
+                        margin-bottom: 8px;
+                    }}
+
+                    .subtitle {{
+                        color: #666666;
+                        font-size: 16px;
+                        font-weight: 500;
+                    }}
+
+                    .content {{
+                        padding: 48px 32px;
+                    }}
+
+                    .greeting {{
+                        font-size: 24px;
+                        font-weight: 700;
+                        color: #1a1a1a;
+                        margin-bottom: 16px;
+                    }}
+
+                    .message {{
+                        color: #666666;
+                        font-size: 15px;
+                        margin-bottom: 32px;
+                        line-height: 1.8;
+                    }}
+
+                    .code-container {{
+                        background: #fff5f5;
+                        border: 2px solid rgba(250, 45, 72, 0.2);
+                        border-radius: 20px;
+                        padding: 32px;
+                        text-align: center;
+                        margin: 32px 0;
+                    }}
+
+                    .code-label {{
+                        font-size: 12px;
+                        font-weight: 600;
+                        text-transform: uppercase;
+                        letter-spacing: 1.5px;
+                        color: #999999;
+                        margin-bottom: 12px;
+                    }}
+
+                    .code {{
+                        font-size: 48px;
+                        font-weight: 800;
+                        letter-spacing: 12px;
+                        background: linear-gradient(135deg, #FA2D48, #ff6b6b);
+                        -webkit-background-clip: text;
+                        -webkit-text-fill-color: transparent;
+                        background-clip: text;
+                        font-family: 'Courier New', monospace;
+                    }}
+
+                    .info-box {{
+                        background: #f9f9f9;
+                        border: 1px solid rgba(0, 0, 0, 0.06);
+                        border-radius: 16px;
+                        padding: 24px;
+                        margin-top: 32px;
+                    }}
+
+                    .info-item {{
+                        display: flex;
+                        align-items: flex-start;
+                        margin-bottom: 12px;
+                        color: #666666;
+                        font-size: 14px;
+                        line-height: 1.6;
+                    }}
+
+                    .info-item:last-child {{
+                        margin-bottom: 0;
+                    }}
+
+                    .info-icon {{
+                        color: #FA2D48;
+                        margin-right: 8px;
+                        flex-shrink: 0;
+                        margin-top: 2px;
+                    }}
+
+                    .footer {{
+                        padding: 32px;
+                        text-align: center;
+                        border-top: 1px solid rgba(0, 0, 0, 0.06);
+                        background: #fafafa;
+                    }}
+
+                    .footer-text {{
+                        color: #999999;
+                        font-size: 13px;
+                        line-height: 1.6;
+                    }}
+
+                    .footer-logo {{
+                        color: #666666;
+                        font-size: 12px;
+                        margin-top: 8px;
+                        font-weight: 600;
+                    }}
+
+                    /* Responsive */
+                    @media (max-width: 640px) {{
+                        body {{
+                            padding: 12px;
+                        }}
+
+                        .container {{
+                            border-radius: 16px;
+                        }}
+
+                        .header {{
+                            padding: 32px 24px 24px;
+                        }}
+
+                        .logo {{
+                            font-size: 36px;
+                        }}
+
+                        .content {{
+                            padding: 32px 24px;
+                        }}
+
+                        .greeting {{
+                            font-size: 20px;
+                        }}
+
+                        .code {{
+                            font-size: 36px;
+                            letter-spacing: 8px;
+                        }}
+
+                        .footer {{
+                            padding: 24px;
+                        }}
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class='container'>
+                    <div class='header'>
+                        <div class='logo'>Riff</div>
+                        <div class='subtitle'>음악 장비 거래 플랫폼</div>
+                    </div>
+
+                    <div class='content'>
+                        <h1 class='greeting'>안녕하세요!</h1>
+                        <p class='message'>
+                            안녕하세요 Riff 입니다.<br>
+                            아래 인증 코드를 입력하여 이메일 인증을 완료해주세요.
+                        </p>
+
+                        <div class='code-container'>
+                            <div class='code-label'>인증 코드</div>
+                            <div class='code'>{_verificationCode}</div>
+                        </div>
+
+                        <div class='info-box'>
+                            <div class='info-item'>
+                                <span class='info-icon'>•</span>
+                                <span>이 코드는 5분 동안 유효합니다.</span>
+                            </div>
+                            <div class='info-item'>
+                                <span class='info-icon'>•</span>
+                                <span>본인이 가입하지 않았다면 이 메일을 무시하세요.</span>
+                            </div>
+                            <div class='info-item'>
+                                <span class='info-icon'>•</span>
+                                <span>보안을 위해 이 코드를 타인과 공유하지 마세요.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class='footer'>
+                        <p class='footer-text'>
+                            © 2025 Riff. All rights reserved.
+                        </p>
+                        <p class='footer-logo'>
+                            당신의 음악, 우리의 리프
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        ";
+    }
+}

@@ -7,17 +7,15 @@ using api.DTOs.Requests;
 using api.Models;
 using api.Services;
 using DotNetEnv;
-using System.Diagnostics.CodeAnalysis;
-using FirebaseAdmin.Auth;
 
 namespace api.Tests.Services;
 
-public class AuthServiceTests
+public class AuthServiceTests : IDisposable
 {
     private readonly Mock<ILogger<AuthService>> _loggerMock;
     private readonly Mock<IConfiguration> _configurationMock;
     private readonly Mock<IUserService> _userServiceMock;
-    private readonly Mock<IFirebaseService> _firebaseServiceMock;
+    private readonly Mock<IEmailService> _emailServiceMock;
     private readonly Mock<ITokenService> _tokenServiceMock;
     private ApplicationDbContext _context = null!;
     private AuthService _authService = null!;
@@ -29,15 +27,14 @@ public class AuthServiceTests
         _loggerMock = new Mock<ILogger<AuthService>>();
         _configurationMock = new Mock<IConfiguration>();
         _userServiceMock = new Mock<IUserService>();
-        _firebaseServiceMock = new Mock<IFirebaseService>();
+        _emailServiceMock = new Mock<IEmailService>();
         _tokenServiceMock = new Mock<ITokenService>();
     }
 
     private void InitializeContext()
     {
-        // 메모리에 가상 데이터베이스 생성
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString()) // 데이터베이스 이름은 랜덤으로 생성
+            .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
             .Options;
         _context = new ApplicationDbContext(options);
 
@@ -46,350 +43,691 @@ public class AuthServiceTests
             _loggerMock.Object,
             _configurationMock.Object,
             _userServiceMock.Object,
-            _firebaseServiceMock.Object,
+            _emailServiceMock.Object,
             _tokenServiceMock.Object
         );
     }
 
-    // 회원가입 - 정상
-    [Fact]
-    public async Task RegisterAsync_ShouldAuthResponse_WhenValidRequest()
+    public void Dispose()
     {
-        // Given
-        InitializeContext(); // 테스트 전에 데이터베이스 초기화
-
-        var request = new RegisterRequest
-        {
-            Email = "test@test.com",
-            Password = "Password123!",
-            PasswordConfirm = "Password123!",
-            Nickname = "testuser",
-            Phone = "010-1234-5678",
-            FirebaseIdToken = "qwer"
-        };
-
-        _firebaseServiceMock
-            .Setup(x => x.VerifyIdTokenAsync(It.IsAny<string>())) // firebase 토큰 인증 시
-            .ReturnsAsync((FirebaseToken)null!); // FirebaseToken은 생성 불가하므로 null 반환
-
-        _userServiceMock
-            .Setup(x => x.GetUserByEmailAsync(It.IsAny<string>())) // 이메일 중복 체크 시
-            .ReturnsAsync((User?)null); // 존재하지 않음
-
-        _userServiceMock
-            .Setup(x => x.GetUserByNicknameAsync(It.IsAny<string>())) // 닉네임 중복 체크 시
-            .ReturnsAsync((User?)null); // 존재하지 않음
-
-        // When
-        var response = await _authService.RegisterAsync(request);
-
-        // Then
-        Assert.NotNull(response); // Null이면 안되고
-        Assert.NotEqual(Guid.Empty, response.UserId);
-        Assert.Equal(request.Email, response.Email); // 이메일이 같아야 하고
-        Assert.Equal(request.Nickname, response.Nickname); // 닉네임이 같아야 하고
-        Assert.True(response.Verified); // Firebase 인증을 통한 회원가입이므로 인증된 상태여야 함
+        _context?.Database.EnsureDeleted();
+        _context?.Dispose();
     }
 
-    // 회원가입 - Firebase 인증 실패일 때
+    #region 이메일 인증 요청
+
+    // 정상
     [Fact]
-    public async Task RegisterAsync_ShouldThrowException_WhenFirebaseVertifyFailed()
+    public async Task SendVerificationCodeAsync_NewEmail_Success()
     {
-        // Given
+        // Arrange
         InitializeContext();
+        var email = "test@test.com";
 
-        var request = new RegisterRequest
-        {
-            Email = "test@test.com",
-            Password = "Password123!",
-            Nickname = "testuser",
-            Phone = "010-1234-5678",
-            FirebaseIdToken = "qwer"
-        };
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync((User?)null);
+        _emailServiceMock.Setup(x => x.SendVerificationEmailAsync(email, It.IsAny<string>()))
+            .Returns(Task.CompletedTask);
 
-        // When
-        _firebaseServiceMock
-            .Setup(x => x.VerifyIdTokenAsync(It.IsAny<string>())) // firebase 토큰 인증 시
-            .ThrowsAsync(new Exception("Firebase authentication failed")); // Firebase 인증 실패 예외 발생
+        // Act
+        var result = await _authService.SendVerificationCodeAsync(email);
 
-        // Then
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RegisterAsync(request)
-        );
-        Assert.Equal("Invalid Firebase ID token", exception.Message); // 예외 메시지가 "Invalid Firebase ID token"이어야 함
+        // Assert
+        Assert.True(result);
+        _emailServiceMock.Verify(x => x.SendVerificationEmailAsync(email, It.IsAny<string>()), Times.Once);
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+        Assert.NotNull(user); // user는 null이 아니어야 하고
+        Assert.False(user.Verified); // 인증되지 않은 상태여야 하며
+        Assert.NotNull(user.VerificationCode); // 코드가 있어야 하고
+        Assert.Equal(6, user.VerificationCode.Length); // 코드의 길이는 6자리 이어야 하고
+        Assert.NotNull(user.VerificationToken); // 토큰이 있어야 한다.
     }
 
+    // 차단된 이메일일 때
     [Fact]
-    public async Task RegisterAsync_ShouldThrowException_WhenEmailAlreadyExists() // 회원가입 - 이미 유저 테이블에 존재하는 이메일일 때
+    public async Task SendVerificationCodeAsync_BlockedEmail_ThrowsException()
     {
-        // Given
+        // Arrange
         InitializeContext();
-
-        // 이미 존재할 사용자 생성
-        var existingUser = new User
+        var email = "test@test.com";
+        var blockedUser = new BlockedUser
         {
-            Id = Guid.NewGuid(),
-            Email = "test@test.com",
-            Password = "hashedpassword",
-            Nickname = "existing",
-            Phone = "010-1234-5678",
-            Verified = true,
-            Rating = 0.0,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
+            Email = email,
+            Reason = "Spam account",
+            BlockedAt = DateTime.UtcNow,
+            ExpiresAt = null
         };
-        _context.Users.Add(existingUser);
+        _context.BlockedUsers.Add(blockedUser);
         await _context.SaveChangesAsync();
 
-        // When
-        var request = new RegisterRequest
-        {
-            Email = "test@test.com",
-            Password = "Password123!",
-            Nickname = "testuser",
-            Phone = "010-1234-5678",
-            FirebaseIdToken = "qwer"
-        };
-
-        _firebaseServiceMock
-            .Setup(x => x.VerifyIdTokenAsync(It.IsAny<string>())) // firebase 토큰 인증 시
-            .ReturnsAsync((FirebaseToken)null!); // FirebaseToken은 생성 불가하므로 null 반환
-
-        _userServiceMock
-            .Setup(x => x.GetUserByEmailAsync(It.IsAny<string>())) // 이메일 중복 체크 시
-            .ReturnsAsync(existingUser); // 존재하는 사용자 반환
-
-        // Then
+        // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RegisterAsync(request)
+            () => _authService.SendVerificationCodeAsync(email)
         );
-        Assert.Equal("Email already exists", exception.Message); // 예외 메시지가 "Email already exists"이어야 함
+        Assert.Equal("Spam account", exception.Message);
     }
 
-    // 회원가입 - 이미 유저 테이블에 존재하는 닉네임일 때
+    // 이미 인증 받은 이메일이 존재할 때
     [Fact]
-    public async Task RegisterAsync_ShouldThrowException_WhenNicknameAlreadyExists()
+    public async Task SendVerificationCodeAsync_AlreadyVerifiedEmail_ThrowsException()
     {
-        // Given
+        // Arrange
         InitializeContext();
-
-        var existingUser = new User
+        var email = "test@test.com";
+        var verifiedUser = new User
         {
             Id = Guid.NewGuid(),
-            Email = "existing@example.com",
+            Email = email,
+            Verified = true,
             Password = "hashedpassword",
-            Nickname = "testuser",  // 중복될 닉네임
-            Phone = "010-1234-5678",
-            Verified = true,
+            Nickname = "testuser",
             Rating = 0.0,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
-        _context.Users.Add(existingUser);
-        await _context.SaveChangesAsync();
 
-        // 회원가입 요청 생성 (같은 닉네임)
-        var request = new RegisterRequest
-        {
-            Email = "newuser@example.com",
-            Password = "Password123!",
-            PasswordConfirm = "Password123!",
-            Nickname = "testuser",  // 중복
-            Phone = "010-9876-5432"
-        };
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(verifiedUser);
 
-        // When
-        _firebaseServiceMock
-            .Setup(x => x.VerifyIdTokenAsync(It.IsAny<string>())) // firebase 토큰 인증 시
-            .ReturnsAsync((FirebaseToken)null!); // FirebaseToken은 생성 불가하므로 null 반환
-
-        _userServiceMock
-            .Setup(x => x.GetUserByEmailAsync(It.IsAny<string>())) // 이메일 중복 체크 시
-            .ReturnsAsync((User?)null); // 존재하지 않는 사용자 반환
-
-        _userServiceMock
-            .Setup(x => x.GetUserByNicknameAsync(It.IsAny<string>())) // 닉네임 중복 체크 시
-            .ReturnsAsync(existingUser); // 존재하는 사용자 반환
-
-        // Then
+        // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RegisterAsync(request)
+            () => _authService.SendVerificationCodeAsync(email)
         );
-        Assert.Equal("Nickname already exists", exception.Message);
+        Assert.Equal("Email already exists", exception.Message);
     }
 
-    // 로그인 - 정상
+    // 5번 시도한 이메일
     [Fact]
-    public async Task LoginAsync_ShouldAuthResponse_WhenValidRequest()
+    public async Task SendVerificationCodeAsync_FiveAttempts_BlocksEmail()
     {
-        // Given
-        InitializeContext(); // 테스트 전에 데이터베이스 초기화
-
-        var request = new LoginRequest
-        {
-            Email = "test@test.com",
-            Password = "Password123!"
-        };
-
-        // 실제 BCrypt로 해시 생성
-        var hashedPassword = BCrypt.Net.BCrypt.HashPassword("Password123!");
-
-        var existingUser = new User
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var user = new User
         {
             Id = Guid.NewGuid(),
-            Email = "test@test.com",
-            Password = hashedPassword,
-            Nickname = "existing",
-            Phone = "010-1234-5678",
-            Verified = true,
+            Email = email,
+            Verified = false,
+            Password = "",
+            Nickname = "",
             Rating = 0.0,
+            VerificationEmailAttempts = 5,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
 
-        _userServiceMock
-            .Setup(x => x.GetUserByEmailAsync(It.IsAny<string>())) // 이메일 중복 체크 시
-            .ReturnsAsync(existingUser); // 존재함
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
 
-        _tokenServiceMock
-          .Setup(x => x.GenerateAccessToken(It.IsAny<User>()))
-          .Returns("test_access_token");
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.SendVerificationCodeAsync(email)
+        );
+        Assert.Contains("temporarily blocked for 24 hours", exception.Message);
 
-        _tokenServiceMock
-            .Setup(x => x.GenerateRefreshTokenAsync(It.IsAny<Guid>()))
-            .ReturnsAsync("test_refresh_token");
-
-
-        // When
-        var response = await _authService.LogInAsync(request);
-
-        // Then
-        Assert.NotNull(response); // Null이면 안되고
-        Assert.NotEqual(Guid.Empty, response.UserId);
-        Assert.Equal(request.Email, response.Email); // 이메일이 같아야 하고
-        Assert.Equal(existingUser.Nickname, response.Nickname); // 닉네임이 같아야 하고
-        Assert.NotNull(response.Token); // jwt 토큰 값이 있어야 하고
-        Assert.NotNull(response.RefreshToken); // jwt refresh 토큰 값이 있어야 하고
-        Assert.NotNull(response.ExpiresAt); // jwt 토큰 만료 시간이 있어야 하고
-        Assert.True(response.Verified); // Firebase 인증을 통한 회원가입이므로 인증된 상태여야 함
+        var blockedUser = await _context.BlockedUsers.FirstOrDefaultAsync(bu => bu.Email == email);
+        Assert.NotNull(blockedUser);
+        Assert.Equal("Too many verification attempts", blockedUser.Reason);
     }
 
-    // 로그인 - 이메일이 없음
-    [Fact]
-    public async Task LoginAsync_ShouldThrowException_WhenEmailNotFound()
-    {
-        // Given
-        InitializeContext(); // 테스트 전에 데이터베이스 초기화
+    # endregion
 
-        var request = new LoginRequest
+    #region 이메일 인증 응답
+
+    // 정상
+    [Fact]
+    public async Task VerifyEmailCodeAsync_ValidCode_ReturnsSessionToken()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var code = "123456";
+        var user = new User
         {
-            Email = "test@test.com",
-            Password = "Password123!"
+            Id = Guid.NewGuid(),
+            Email = email,
+            Verified = false,
+            Password = "",
+            Nickname = "",
+            Rating = 0.0,
+            VerificationCode = code,
+            VerificationToken = "token",
+            VerificationTokenExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
         };
 
-        _userServiceMock
-            .Setup(x => x.GetUserByEmailAsync(It.IsAny<string>())) // 이메일 체크
-            .ReturnsAsync((User?)null); // 존재하지 않는 계정
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
 
+        // Act
+        var sessionToken = await _authService.VerifyEmailCodeAsync(email, code);
 
-        // When
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.LogInAsync(request)
-        );
-
-        // Then
-        Assert.Equal("Email or Password is not correct", exception.Message);
+        // Assert
+        Assert.NotNull(sessionToken); // 세션 토큰이 있어야 하고
+        Assert.NotEmpty(sessionToken); // 세션 토큰이 빈 값이면 안되고
+        Assert.True(user.Verified); // 인증된 유저로 바뀌어야 하고
+        Assert.Null(user.VerificationCode); // 인증 코드는 null로 변경되고
+        Assert.Null(user.VerificationToken); // 인증 토큰 또한 null로 변경되어야 하고
+        Assert.NotNull(user.RegistrationSessionToken); // 가입 세션 토큰 값은 null이 아니어야 하며
+        Assert.NotNull(user.RegistrationSessionExpiry); // 가입 세션 토큰 유효 시간도 null이 아니어야 하며
+        Assert.Equal(sessionToken, user.RegistrationSessionToken); // 세션 토큰과 가입 세션 토큰 값이 같아야 한다.
     }
 
-    // 로그인 - 패스워드 불일치
+    // 인증코드 틀렸을 때
     [Fact]
-    public async Task LoginAsync_ShouldThrowException_WhenPasswordIsIncorrect()
+    public async Task VerifyEmailCodeAsync_InvalidCode_ThrowsException()
     {
-        // Given
+        // Arrange
         InitializeContext();
 
-        var request = new LoginRequest
+        var email = "test@test.com";
+        var user = new User
         {
-            Email = "test@test.com",
-            Password = "WrongPassword123!" // 틀린 비밀번호
+            Id = Guid.NewGuid(),
+            Email = email,
+            Verified = false,
+            Password = "",
+            Nickname = "",
+            Rating = 0.0,
+            VerificationCode = "123456",
+            VerificationTokenExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
         };
 
-        // 올바른 비밀번호로 해시 생성
-        var hashedPassword = BCrypt.Net.BCrypt.HashPassword("CorrectPassword123!");
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
 
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.VerifyEmailCodeAsync(email, "999999")
+        );
+        Assert.Equal("Invalid verification code", exception.Message);
+    }
+
+    // 만료된 코드일 때
+    [Fact]
+    public async Task VerifyEmailCodeAsync_ExpiredCode_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Verified = false,
+            Password = "",
+            Nickname = "",
+            Rating = 0.0,
+            VerificationCode = "123456",
+            VerificationTokenExpiry = DateTime.UtcNow.AddHours(-1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.VerifyEmailCodeAsync(email, "123456")
+        );
+        Assert.Equal("Verification code has expired", exception.Message);
+    }
+
+    #endregion
+
+    #region 닉네임 사용 가능 여부 확인
+
+    // 사용 가능
+    [Fact]
+    public async Task CheckNicknameAvailabilityAsync_Available_ReturnsTrue()
+    {
+        // Arrange
+        InitializeContext();
+        var nickname = "newuser";
+        _userServiceMock.Setup(x => x.GetUserByNicknameAsync(nickname))
+            .ReturnsAsync((User?)null);
+
+        // Act
+        var result = await _authService.CheckNicknameAvailabilityAsync(nickname);
+
+        // Assert
+        Assert.True(result);
+    }
+
+    // 이미 존재하는 닉네임일 때
+    [Fact]
+    public async Task CheckNicknameAvailabilityAsync_AlreadyExists_ReturnsFalse()
+    {
+        // Arrange
+        InitializeContext();
+        var nickname = "test";
         var existingUser = new User
         {
             Id = Guid.NewGuid(),
             Email = "test@test.com",
-            Password = hashedPassword, // 실제 BCrypt 해시
-            Nickname = "existing",
-            Phone = "010-1234-5678",
+            Nickname = nickname,
             Verified = true,
+            Password = "hashedpassword",
             Rating = 0.0,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
 
-        _userServiceMock
-            .Setup(x => x.GetUserByEmailAsync(It.IsAny<string>()))
+        _userServiceMock.Setup(x => x.GetUserByNicknameAsync(nickname))
             .ReturnsAsync(existingUser);
 
-        // When & Then
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.LogInAsync(request)
-        );
+        // Act
+        var result = await _authService.CheckNicknameAvailabilityAsync(nickname);
 
-        Assert.Equal("Email or Password is not correct", exception.Message);
+        // Assert
+        Assert.False(result);
     }
 
-    // 로그인 - 인증되지 않은 계정
+    #endregion
+
+    #region 이메일 인증, 닉네임 확인까지 끝낸 후, 실제 회원가입
+
+    // 정상
     [Fact]
-    public async Task LoginAsync_ShouldThrowException_WhenUserIsNotVerified()
+    public async Task RegisterAsync_ValidRequest_Success()
     {
-        // Given
+        // Arrange
         InitializeContext();
+        var email = "test@test.com";
+        var sessionToken = "valid_session_token";
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Nickname = "",
+            Verified = true,
+            Password = "",
+            Rating = 0.0,
+            RegistrationSessionToken = sessionToken,
+            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(30),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+        _userServiceMock.Setup(x => x.GetUserByNicknameAsync(It.IsAny<string>()))
+            .ReturnsAsync((User?)null);
+        _userServiceMock.Setup(x => x.GetUserByPhoneAsync(It.IsAny<string>()))
+            .ReturnsAsync((User?)null);
+
+        var request = new RegisterRequest
+        {
+            Email = email,
+            SessionToken = sessionToken,
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "test",
+            Phone = "010-1234-5678"
+        };
+
+        // Act
+        var response = await _authService.RegisterAsync(request);
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Equal(user.Id, response.UserId);
+        Assert.Equal(email, response.Email);
+        Assert.Equal("test", response.Nickname);
+        Assert.True(response.Verified);
+        Assert.Null(response.Token);
+        Assert.Null(response.RefreshToken);
+
+        Assert.Null(user.RegistrationSessionToken);
+        Assert.Null(user.RegistrationSessionExpiry);
+        Assert.NotEmpty(user.Password);
+    }
+
+    // 세션 토큰일 틀릴 때
+    [Fact]
+    public async Task RegisterAsync_InvalidSessionToken_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Verified = true,
+            Password = "",
+            Nickname = "",
+            Rating = 0.0,
+            RegistrationSessionToken = "correct_token",
+            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(30),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        var request = new RegisterRequest
+        {
+            Email = email,
+            SessionToken = "wrong_token",
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "test"
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.RegisterAsync(request)
+        );
+        Assert.Equal("Invalid session token.", exception.Message);
+    }
+
+    // 세션 토큰이 만료되었을 때
+    [Fact]
+    public async Task RegisterAsync_ExpiredSession_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var sessionToken = "expired_token";
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Verified = true,
+            Password = "",
+            Nickname = "",
+            Rating = 0.0,
+            RegistrationSessionToken = sessionToken,
+            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(-5),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        var request = new RegisterRequest
+        {
+            Email = email,
+            SessionToken = sessionToken,
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "test"
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.RegisterAsync(request)
+        );
+        Assert.Equal("Session expired. Please verify your email again.", exception.Message);
+    }
+
+    // 세션 토큰이 다른 이메일로부터 회원가입을 시도될 때
+    [Fact]
+    public async Task RegisterAsync_DifferentEmailWithValidToken_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var emailB = "b@test.com"; // 소문자로 저장
+        var AToken = "A_session_token";
+
+        var bob = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = emailB,
+            Verified = true,
+            Password = "",
+            Nickname = "",
+            Rating = 0.0,
+            RegistrationSessionToken = "B_session_token",
+            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(30),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(emailB))
+            .ReturnsAsync(bob);
+
+        var request = new RegisterRequest
+        {
+            Email = emailB,
+            SessionToken = AToken,
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "test"
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.RegisterAsync(request)
+        );
+        Assert.Equal("Invalid session token.", exception.Message);
+    }
+
+    #endregion
+
+    #region 로그인 테스트
+
+    // 정상 로그인
+    [Fact]
+    public async Task LogInAsync_ValidCredentials_ReturnsToken()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = true,
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+        _tokenServiceMock.Setup(x => x.GenerateAccessToken(user))
+            .Returns("jwt_token");
+        _tokenServiceMock.Setup(x => x.GenerateRefreshTokenAsync(user.Id))
+            .ReturnsAsync("refresh_token");
+
+        Environment.SetEnvironmentVariable("JWT_EXPIRATION_MINUTES", "60");
 
         var request = new LoginRequest
         {
-            Email = "test@test.com",
+            Email = email,
+            Password = password
+        };
+
+        // Act
+        var response = await _authService.LogInAsync(request);
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Equal(user.Id, response.UserId);
+        Assert.Equal(email, response.Email);
+        Assert.Equal("test", response.Nickname);
+        Assert.Equal("jwt_token", response.Token);
+        Assert.Equal("refresh_token", response.RefreshToken);
+        Assert.NotNull(response.ExpiresAt);
+    }
+
+    // 유효하지 않은 이메일
+    [Fact]
+    public async Task LogInAsync_InvalidEmail_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync((User?)null);
+
+        var request = new LoginRequest
+        {
+            Email = email,
             Password = "Password123!"
         };
 
-        // 올바른 비밀번호로 해시 생성
-        var hashedPassword = BCrypt.Net.BCrypt.HashPassword("Password123!");
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.LogInAsync(request)
+        );
+        Assert.Equal("Email or Password is not correct", exception.Message);
+    }
 
-        var existingUser = new User
+    // 패스워드가 틀렸을 때
+    [Fact]
+    public async Task LogInAsync_InvalidPassword_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword("CorrectPassword123!");
+
+        var user = new User
         {
             Id = Guid.NewGuid(),
-            Email = "test@test.com",
-            Password = hashedPassword, // 실제 BCrypt 해시
-            Nickname = "existing",
-            Phone = "010-1234-5678",
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = true,
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = "WrongPassword123!"
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.LogInAsync(request)
+        );
+        Assert.Equal("Email or Password is not correct", exception.Message);
+    }
+
+    // 인증되지 않은 유저일 때
+    [Fact]
+    public async Task LogInAsync_UnverifiedUser_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
             Verified = false,
             Rating = 0.0,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
 
-        _userServiceMock
-            .Setup(x => x.GetUserByEmailAsync(It.IsAny<string>()))
-            .ReturnsAsync(existingUser);
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
 
-        // When & Then
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _authService.LogInAsync(request)
         );
-
         Assert.Equal("Account is not verified", exception.Message);
     }
 
-    // 로그아웃 - 정상 (토큰 있음)
+    // 차단당한 유저일 때
     [Fact]
-    public async Task LogOutAsync_ShouldReturnTrue_WhenValidRefreshToken()
+    public async Task LogInAsync_BlockedUser_ThrowsException()
     {
-        // Given
+        // Arrange
         InitializeContext();
+        var email = "blocked@example.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
 
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = true,
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        var blockedUser = new BlockedUser
+        {
+            UserId = user.Id,
+            Email = email,
+            Reason = "Account suspended",
+            BlockedAt = DateTime.UtcNow,
+            ExpiresAt = null
+        };
+
+        _context.Users.Add(user);
+        _context.BlockedUsers.Add(blockedUser);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.LogInAsync(request)
+        );
+        Assert.Equal("Account suspended", exception.Message);
+    }
+
+    #endregion
+
+    #region 로그아웃 테스트
+
+    // 정상적인 로그아웃
+    [Fact]
+    public async Task LogOutAsync_ValidRefreshToken_Success()
+    {
+        // Arrange
+        InitializeContext();
         var userId = Guid.NewGuid();
         var refreshToken = "valid_refresh_token";
 
@@ -406,53 +744,50 @@ public class AuthServiceTests
         _context.RefreshTokens.Add(refreshTokenEntity);
         await _context.SaveChangesAsync();
 
-        // When
+        // Act
         var result = await _authService.LogOutAsync(refreshToken);
 
-        // Then
+        // Assert
         Assert.True(result);
-
-        // Refresh Token이 무효화되었는지 확인
         var revokedToken = await _context.RefreshTokens.FindAsync(refreshTokenEntity.Id);
         Assert.NotNull(revokedToken);
         Assert.NotNull(revokedToken.RevokedAt);
     }
 
-    // 로그아웃 - 정상 (토큰 없음)
+    // refresh token이 없을 때 로그아웃
     [Fact]
-    public async Task LogOutAsync_ShouldReturnTrue_WhenNoRefreshToken()
+    public async Task LogOutAsync_NoRefreshToken_Success()
     {
-        // Given
+        // Arrange
         InitializeContext();
 
-        // When
+        // Act
         var result = await _authService.LogOutAsync(null);
 
-        // Then
+        // Assert
         Assert.True(result);
     }
 
-    // 로그아웃 - 존재하지 않는 토큰
+    // 존재하지 않은 token이 들어왔을 때
     [Fact]
-    public async Task LogOutAsync_ShouldReturnTrue_WhenTokenNotFound()
+    public async Task LogOutAsync_NonExistentToken_Success()
     {
-        // Given
+        // Arrange
         InitializeContext();
 
-        // When
+        // Act
         var result = await _authService.LogOutAsync("non_existent_token");
 
-        // Then
+        // Assert
         Assert.True(result); // 존재하지 않는 토큰이어도 성공 반환
     }
 
-    // 로그아웃 - 이미 무효화된 토큰
+    // 이미 취소된 token일 때
     [Fact]
-    public async Task LogOutAsync_ShouldReturnTrue_WhenTokenAlreadyRevoked()
+    public async Task LogOutAsync_AlreadyRevokedToken_Success()
     {
-        // Given
+        // Arrange
         InitializeContext();
-
         var userId = Guid.NewGuid();
         var refreshToken = "already_revoked_token";
 
@@ -469,111 +804,93 @@ public class AuthServiceTests
         _context.RefreshTokens.Add(refreshTokenEntity);
         await _context.SaveChangesAsync();
 
-        // When
+        // Act
         var result = await _authService.LogOutAsync(refreshToken);
 
-        // Then
+        // Assert
         Assert.True(result); // 이미 무효화된 토큰이어도 성공 반환
     }
 
-    // 토큰 갱신 - 정상
-    [Fact]
-    public async Task RefreshAccessTokenAsync_ShouldReturnAuthResponse_WhenValidRefreshToken()
-    {
-        // Given
-        InitializeContext();
+    #endregion
 
+    #region 토큰 갱신 테스트
+
+    // 정상 갱신
+    [Fact]
+    public async Task RefreshAccessTokenAsync_ValidToken_ReturnsNewTokens()
+    {
+        // Arrange
+        InitializeContext();
         var userId = Guid.NewGuid();
         var refreshToken = "valid_refresh_token";
 
         var user = new User
         {
             Id = userId,
-            Email = "test@example.com",
+            Email = "test@test.com",
             Password = "hashedpassword",
-            Nickname = "testuser",
-            Phone = "010-1234-5678",
+            Nickname = "test",
             Verified = true,
             Rating = 0.0,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
 
-        var refreshTokenEntity = new RefreshToken
-        {
-            Id = Guid.NewGuid(),
-            Token = refreshToken,
-            UserId = userId,
-            ExpiresAt = DateTime.UtcNow.AddDays(7),
-            CreatedAt = DateTime.UtcNow,
-            RevokedAt = null,
-            User = user
-        };
-
-        _context.Users.Add(user);
-        _context.RefreshTokens.Add(refreshTokenEntity);
-        await _context.SaveChangesAsync();
-
         _tokenServiceMock
-            .Setup(x => x.GenerateAccessToken(It.IsAny<User>()))
-            .Returns("new_access_token");
-
-        _tokenServiceMock
-            .Setup(x => x.GenerateRefreshTokenAsync(It.IsAny<Guid>()))
-            .ReturnsAsync("new_refresh_token");
-
-        _tokenServiceMock
-            .Setup(x => x.RefreshAccessTokenAsync(It.IsAny<string>()))
+            .Setup(x => x.RefreshAccessTokenAsync(refreshToken))
             .ReturnsAsync(("new_access_token", "new_refresh_token", user));
 
-        // When
+        Environment.SetEnvironmentVariable("JWT_EXPIRATION_MINUTES", "60");
+
+        // Act
         var response = await _authService.RefreshAccessTokenAsync(refreshToken);
 
-        // Then
+        // Assert
         Assert.NotNull(response);
         Assert.Equal(userId, response.UserId);
         Assert.Equal(user.Email, response.Email);
         Assert.Equal(user.Nickname, response.Nickname);
-        Assert.NotNull(response.Token);
-        Assert.NotNull(response.RefreshToken);
+        Assert.Equal("new_access_token", response.Token);
+        Assert.Equal("new_refresh_token", response.RefreshToken);
+        Assert.NotNull(response.ExpiresAt);
         Assert.True(response.Verified);
     }
 
-    // 토큰 갱신 - 유효하지 않은 토큰
+    // 올바르지 않은 token일 때
     [Fact]
-    public async Task RefreshAccessTokenAsync_ShouldThrowException_WhenInvalidRefreshToken()
+    public async Task RefreshAccessTokenAsync_InvalidToken_ThrowsException()
     {
-        // Given
+        // Arrange
         InitializeContext();
 
         _tokenServiceMock
             .Setup(x => x.RefreshAccessTokenAsync(It.IsAny<string>()))
             .ThrowsAsync(new InvalidOperationException("Invalid refresh token"));
 
-        // When & Then
+        // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _authService.RefreshAccessTokenAsync("invalid_token")
         );
-
         Assert.Equal("Invalid refresh token", exception.Message);
     }
 
-    // 토큰 갱신 - 만료된 토큰
+    // 만료된 token일 때
     [Fact]
-    public async Task RefreshAccessTokenAsync_ShouldThrowException_WhenExpiredRefreshToken()
+    public async Task RefreshAccessTokenAsync_ExpiredToken_ThrowsException()
     {
-        // Given
+        // Arrange
         InitializeContext();
 
         _tokenServiceMock
             .Setup(x => x.RefreshAccessTokenAsync(It.IsAny<string>()))
             .ThrowsAsync(new InvalidOperationException("Refresh token is expired or revoked"));
 
-        // When & Then
+        // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _authService.RefreshAccessTokenAsync("expired_token")
         );
-
         Assert.Equal("Refresh token is expired or revoked", exception.Message);
     }
+
+    #endregion
 }

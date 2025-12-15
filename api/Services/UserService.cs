@@ -15,29 +15,22 @@ public class UserService : IUserService
         _logger = logger;
     }
 
-    /// <summary>
-    /// 이메일 사용 가능 여부 체크 (활성 사용자 + 대기 사용자)
-    /// </summary>
+    // 이메일 사용 가능 여부 체크
     public async Task<bool> IsEmailAvailableAsync(string email)
     {
-        // 활성 사용자 중복 체크
+        // 활성 사용자 중복 체크 (대소문자 구분 안 함)
         var existingUser = await _context.Users
-            .AnyAsync(u => u.Email == email);
+            .AnyAsync(u => u.Email.ToLower() == email.ToLower());
 
         if (existingUser)
         {
             _logger.LogInformation("Email {Email} already exists in Users table", email);
             return false;
         }
-
-
-
         return true;
     }
 
-    /// <summary>
-    /// 닉네임 사용 가능 여부 체크 (활성 사용자 + 대기 사용자)
-    /// </summary>
+    // 닉네임 사용 가능 여부 체크
     public async Task<bool> IsNicknameAvailableAsync(string nickname)
     {
         // 활성 사용자 중복 체크
@@ -49,16 +42,19 @@ public class UserService : IUserService
             _logger.LogInformation("Nickname {Nickname} already exists in Users table", nickname);
             return false;
         }
-
-
-
         return true;
+    }
+
+    public async Task<User?> GetUserByPhoneAsync(string phone)
+    {
+        return await _context.Users
+            .FirstOrDefaultAsync(u => u.Phone == phone);
     }
 
     public async Task<User?> GetUserByEmailAsync(string email)
     {
         return await _context.Users
-            .FirstOrDefaultAsync(u => u.Email == email);
+            .FirstOrDefaultAsync(u => u.Email.ToLower() == email.ToLower());
     }
 
     public async Task<User?> GetUserByNicknameAsync(string nickname)

@@ -17,6 +17,8 @@ public partial class ApplicationDbContext : DbContext
     }
 
     public virtual DbSet<User> Users { get; set; }
+    public virtual DbSet<UserOAuth> UserOAuths { get; set; }
+    public virtual DbSet<BlockedUser> BlockedUsers { get; set; }
 
     public virtual DbSet<RefreshToken> RefreshTokens { get; set; }
     public virtual DbSet<Category> Categories { get; set; }
@@ -94,9 +96,57 @@ public partial class ApplicationDbContext : DbContext
             entity.Property(e => e.Verified).HasColumnName("verified");
             entity.Property(e => e.VerificationToken).HasColumnName("verificationToken");
             entity.Property(e => e.VerificationTokenExpiry).HasColumnName("verificationTokenExpiry");
+            entity.Property(e => e.VerificationCode).HasColumnName("verificationCode");
+            entity.Property(e => e.LastVerificationEmailSentAt).HasColumnName("lastVerificationEmailSentAt");
+            entity.Property(e => e.VerificationEmailAttempts).HasDefaultValue(0).HasColumnName("verificationEmailAttempts");
+            entity.Property(e => e.RegistrationSessionToken).HasColumnName("registrationSessionToken");
+            entity.Property(e => e.RegistrationSessionExpiry).HasColumnName("registrationSessionExpiry");
         });
 
+        modelBuilder.Entity<UserOAuth>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("user_oauth_pkey");
+            entity.ToTable("user_oauth");
 
+            entity.Property(e => e.Id).ValueGeneratedOnAdd().HasColumnName("id");
+            entity.Property(e => e.UserId).HasColumnName("user_id");
+            entity.Property(e => e.Provider).HasMaxLength(50).HasColumnName("provider");
+            entity.Property(e => e.ProviderId).HasMaxLength(255).HasColumnName("provider_id");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()").HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("now()").HasColumnName("updated_at");
+
+            entity.HasOne(d => d.User).WithMany(p => p.UserOAuths)
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_user_oauth_user");
+
+            // 한 유저는 각 Provider당 하나의 계정만
+            entity.HasIndex(e => new { e.UserId, e.Provider }).IsUnique();
+        });
+
+        modelBuilder.Entity<BlockedUser>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("blocked_users_pkey");
+            entity.ToTable("blocked_users");
+
+            entity.Property(e => e.Id).ValueGeneratedOnAdd().HasColumnName("id");
+            entity.Property(e => e.UserId).HasColumnName("user_id");
+            entity.Property(e => e.Email).HasMaxLength(255).HasColumnName("email");
+            entity.Property(e => e.Reason).HasColumnName("reason");
+            entity.Property(e => e.BlockedAt).HasDefaultValueSql("now()").HasColumnName("blocked_at");
+            entity.Property(e => e.ExpiresAt).HasColumnName("expires_at");
+            entity.Property(e => e.BlockedBy).HasMaxLength(255).HasColumnName("blocked_by");
+
+            // 외래키
+            entity.HasOne(d => d.User).WithMany()
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_blocked_user_user");
+
+            // 인덱스
+            entity.HasIndex(e => e.UserId);
+            entity.HasIndex(e => e.Email);
+        });
 
         modelBuilder.Entity<RefreshToken>(entity =>
         {

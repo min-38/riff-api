@@ -1,0 +1,29 @@
+# Environment files
+.env
+.env.test
+.env.local
+.env.*.local
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Secrets
+*.key
+*.pem
+*firebase*.json
+
+# flutter
+app

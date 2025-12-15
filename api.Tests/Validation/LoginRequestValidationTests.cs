@@ -20,7 +20,7 @@ public class LoginRequestValidationTests
         // Given
         var request = new LoginRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
             Password = "Password123!",
         };
 
@@ -60,7 +60,7 @@ public class LoginRequestValidationTests
         // Given
         var request = new LoginRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
             Password = ""
         };
 

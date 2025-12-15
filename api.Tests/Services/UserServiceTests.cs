@@ -7,7 +7,7 @@ using api.Services;
 
 namespace api.Tests.Services;
 
-public class UserServiceTests
+public class UserServiceTests : IDisposable
 {
     private readonly Mock<ILogger<UserService>> _loggerMock;
     private ApplicationDbContext _context = null!;
@@ -23,100 +23,322 @@ public class UserServiceTests
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()
             .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
             .Options;
-
         _context = new ApplicationDbContext(options);
         _userService = new UserService(_context, _loggerMock.Object);
     }
 
-    #region IsEmailAvailableAsync Tests
+    public void Dispose()
+    {
+        _context?.Dispose(); // DB 컨텍스트 리소스 정리
+    }
 
-    // 이메일 사용 가능 여부 - 실제 유저 테이블에 이메일이 존재하지 않을 때
+    #region 이메일 중복 테스트
+
+    // 사용 가능한 이메일
     [Fact]
     public async Task IsEmailAvailableAsync_ShouldReturnTrue_WhenEmailDoesNotExist()
     {
-        // Given
+        // Arrange
         InitializeContext();
+        var email = "test@test.com";
 
-        // When
-        var isAvailable = await _userService.IsEmailAvailableAsync("test@test.com");
+        // Act
+        var result = await _userService.IsEmailAvailableAsync(email);
 
-        // Then
-        Assert.True(isAvailable);
+        // Assert
+        Assert.True(result);
     }
 
-    // 이메일 사용 가능 여부 - 실제 유저 테이블에 이메일이 존재할 때
+    // 이메일이 이미 존재하는 경우
     [Fact]
-    public async Task IsEmailAvailableAsync_ShouldReturnFalse_WhenEmailExistsInUsers()
+    public async Task IsEmailAvailableAsync_ShouldReturnFalse_WhenEmailExists()
     {
-        // Given
+        // Arrange
         InitializeContext();
-
-        // When
-        var existingUser = new User
+        var email = "test@test.com";
+        var user = new User
         {
-            Id = Guid.NewGuid(),
-            Email = "test@test.com",
-            Password = "hashedpassword",
-            Nickname = "testuser",
-            Phone = "010-1234-5678",
-            Verified = true,
-            Rating = 0.0,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
+            Email = email,
+            Phone = "01012345678",
+            Nickname = "test"
         };
-        _context.Users.Add(existingUser);
+        _context.Users.Add(user);
         await _context.SaveChangesAsync();
 
-        // Then
-        var isAvailable = await _userService.IsEmailAvailableAsync("test@test.com");
-        Assert.False(isAvailable);
+        // Act
+        var result = await _userService.IsEmailAvailableAsync(email);
+
+        // Assert
+        Assert.False(result);
+    }
+
+    // 대소문자가 다른 이메일도 중복으로 처리
+    [Fact]
+    public async Task IsEmailAvailableAsync_ShouldBeCaseInsensitive()
+    {
+        // Arrange
+        InitializeContext();
+        var existingEmail = "Test@test.com";
+        var checkEmail = "test@test.com";
+        var user = new User
+        {
+            Email = existingEmail,
+            Phone = "01012345678",
+            Nickname = "test"
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act
+        var result = await _userService.IsEmailAvailableAsync(checkEmail);
+
+        // Assert
+        Assert.False(result); // 대소문자가 달라도 중복으로 처리
     }
 
     #endregion
 
-    #region IsNicknameAvailableAsync Tests
+    #region 닉네임 중복 테스트
 
-    // 닉네임 사용 가능 여부 - 실제 유저 테이블에 닉네임이 존재하지 않을 때
+    // 닉네임이 사용 가능한 경우 (DB에 없음)
     [Fact]
     public async Task IsNicknameAvailableAsync_ShouldReturnTrue_WhenNicknameDoesNotExist()
     {
-        // Given
+        // Arrange
         InitializeContext();
+        var nickname = "newnickname";
 
-        // When
-        var isAvailable = await _userService.IsNicknameAvailableAsync("newnickname");
+        // Act
+        var result = await _userService.IsNicknameAvailableAsync(nickname);
 
-        // Then
-        Assert.True(isAvailable);
+        // Assert
+        Assert.True(result);
     }
 
-    // 실제 유저 테이블에 닉네임이 존재할 때
+    // 닉네임이 이미 존재하는 경우
     [Fact]
-    public async Task IsNicknameAvailableAsync_ShouldReturnFalse_WhenNicknameExistsInUsers()
+    public async Task IsNicknameAvailableAsync_ShouldReturnFalse_WhenNicknameExists()
     {
-        // Given
+        // Arrange
         InitializeContext();
-
-        var existingUser = new User
+        var nickname = "existingnick";
+        var user = new User
         {
-            Id = Guid.NewGuid(),
-            Email = "user@example.com",
-            Password = "hashedpassword",
-            Nickname = "existingnick",
-            Phone = "010-1234-5678",
-            Verified = true,
-            Rating = 0.0,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
+            Email = "test@test.com",
+            Phone = "01012345678",
+            Nickname = nickname
         };
-        _context.Users.Add(existingUser);
+        _context.Users.Add(user);
         await _context.SaveChangesAsync();
 
-        // When
-        var isAvailable = await _userService.IsNicknameAvailableAsync("existingnick");
+        // Act
+        var result = await _userService.IsNicknameAvailableAsync(nickname);
 
-        // Then
-        Assert.False(isAvailable);
+        // Assert
+        Assert.False(result);
+    }
+
+    // 대소문자가 다른 닉네임은 서로 다른 닉네임으로 처리
+    [Fact]
+    public async Task IsNicknameAvailableAsync_ShouldBeCaseSensitive()
+    {
+        // Arrange
+        InitializeContext();
+        var existingNickname = "TestNick";
+        var checkNickname = "testnick";
+        var user = new User
+        {
+            Email = "test@test.com",
+            Phone = "01012345678",
+            Nickname = existingNickname
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act
+        var result = await _userService.IsNicknameAvailableAsync(checkNickname);
+
+        // Assert
+        Assert.True(result); // 대소문자가 달라도 사용 가능
+    }
+
+    #endregion
+
+    #region 핸드폰 번호 테스트
+
+    // 전화번호로 사용자 조회 성공
+    [Fact]
+    public async Task GetUserByPhoneAsync_ShouldReturnUser_WhenUserExists()
+    {
+        // Arrange
+        InitializeContext();
+        var phone = "01012345678";
+        var user = new User
+        {
+            Email = "test@test.com",
+            Phone = phone,
+            Nickname = "testuser"
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act
+        var result = await _userService.GetUserByPhoneAsync(phone);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal(phone, result.Phone);
+        Assert.Equal("test@test.com", result.Email);
+    }
+
+    // 전화번호로 사용자 조회 실패 (없음)
+    [Fact]
+    public async Task GetUserByPhoneAsync_ShouldReturnNull_WhenUserDoesNotExist()
+    {
+        // Arrange
+        InitializeContext();
+        var phone = "01099999999";
+
+        // Act
+        var result = await _userService.GetUserByPhoneAsync(phone);
+
+        // Assert
+        Assert.Null(result);
+    }
+
+    #endregion
+
+    #region 이메일로 유저 찾기 테스트
+
+    // 이메일로 사용자 조회 성공
+    [Fact]
+    public async Task GetUserByEmailAsync_ShouldReturnUser_WhenUserExists()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var user = new User
+        {
+            Email = email,
+            Phone = "01012345678",
+            Nickname = "test"
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act
+        var result = await _userService.GetUserByEmailAsync(email);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal(email, result.Email);
+        Assert.Equal("test", result.Nickname);
+    }
+
+    // 이메일로 사용자 조회 실패
+    [Fact]
+    public async Task GetUserByEmailAsync_ShouldReturnNull_WhenUserDoesNotExist()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+
+        // Act
+        var result = await _userService.GetUserByEmailAsync(email);
+
+        // Assert
+        Assert.Null(result);
+    }
+
+    // 대소문자가 다른 이메일로 조회해도 동일 사용자 반환
+    [Fact]
+    public async Task GetUserByEmailAsync_ShouldBeCaseInsensitive()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "Test@Example.com";
+        var user = new User
+        {
+            Email = email,
+            Phone = "01012345678",
+            Nickname = "testuser"
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act
+        var result = await _userService.GetUserByEmailAsync("test@example.com");
+
+        // Assert
+        Assert.NotNull(result); // 대소문자가 달라도 조회됨
+        Assert.Equal(email, result.Email);
+    }
+
+    #endregion
+
+    #region 닉네임으로 유저 찾기 테스트
+
+    // 닉네임으로 사용자 조회 성공
+    [Fact]
+    public async Task GetUserByNicknameAsync_ShouldReturnUser_WhenUserExists()
+    {
+        // Arrange
+        InitializeContext();
+        var nickname = "test";
+        var user = new User
+        {
+            Email = "test@test.com",
+            Phone = "01012345678",
+            Nickname = nickname
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act
+        var result = await _userService.GetUserByNicknameAsync(nickname);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal(nickname, result.Nickname);
+        Assert.Equal("test@test.com", result.Email);
+    }
+
+    // 닉네임으로 사용자 조회 실패
+    [Fact]
+    public async Task GetUserByNicknameAsync_ShouldReturnNull_WhenUserDoesNotExist()
+    {
+        // Arrange
+        InitializeContext();
+        var nickname = "test";
+
+        // Act
+        var result = await _userService.GetUserByNicknameAsync(nickname);
+
+        // Assert
+        Assert.Null(result);
+    }
+
+    // 대소문자가 다른 닉네임으로 조회하면 찾을 수 없음
+    [Fact]
+    public async Task GetUserByNicknameAsync_ShouldBeCaseSensitive()
+    {
+        // Arrange
+        InitializeContext();
+        var nickname = "Test";
+        var user = new User
+        {
+            Email = "test@test.com",
+            Phone = "01012345678",
+            Nickname = nickname
+        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act
+        var result = await _userService.GetUserByNicknameAsync("test");
+
+        // Assert
+        Assert.Null(result); // 대소문자가 다르면 조회 안 됨
     }
 
     #endregion

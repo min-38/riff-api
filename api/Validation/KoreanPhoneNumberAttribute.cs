@@ -10,9 +10,15 @@ public class KoreanPhoneNumberAttribute : ValidationAttribute
 {
     protected override ValidationResult? IsValid(object? value, ValidationContext validationContext)
     {
+        // null이거나 빈 문자열인 경우 검증 통과 (선택 필드이므로)
+        if (value == null || string.IsNullOrWhiteSpace(value.ToString()))
+        {
+            return ValidationResult.Success;
+        }
+
         if (value is not string phone)
         {
-            return new ValidationResult("Phone number is required");
+            return new ValidationResult("Phone number must be a string");
         }
 
         // 공백과 하이픈 제거

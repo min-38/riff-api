@@ -14,17 +14,17 @@ public class RegisterRequestValidationTests
     }
 
     [Fact]
-    public void RegisterRequest_ShouldPass_WhenAllFieldsAreValid() // 모든 필드 유효
+    public void RegisterRequest_ShouldPass_WhenAllFieldsAreValid()
     {
         // Given
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
-            Nickname = "testuser",
-            Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
+            Nickname = "test",
+            Phone = "010-1234-5678"
         };
 
         // When
@@ -34,7 +34,7 @@ public class RegisterRequestValidationTests
         Assert.Empty(results);
     }
 
-    #region Email Validation Tests
+    #region 이메일 유효성 검사
 
     [Fact]
     public void RegisterRequest_ShouldFail_WhenEmailIsEmpty()
@@ -43,11 +43,11 @@ public class RegisterRequestValidationTests
         var request = new RegisterRequest
         {
             Email = "",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
-            Nickname = "testuser",
+            Nickname = "test",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -68,11 +68,11 @@ public class RegisterRequestValidationTests
         var request = new RegisterRequest
         {
             Email = invalidEmail,
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -80,6 +80,30 @@ public class RegisterRequestValidationTests
 
         // Then
         Assert.Contains(results, r => r.ErrorMessage == "Invalid email format");
+    }
+
+    #endregion
+
+    #region SessionToken Validation Tests
+
+    [Fact]
+    public void RegisterRequest_ShouldFail_WhenSessionTokenIsEmpty()
+    {
+        // Arrange
+        var request = new RegisterRequest
+        {
+            Email = "test@test.com",
+            SessionToken = "",
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "test"
+        };
+
+        // Act
+        var results = ValidateModel(request);
+
+        // Assert
+        Assert.Contains(results, r => r.ErrorMessage == "Registration session token is required");
     }
 
     #endregion
@@ -92,12 +116,12 @@ public class RegisterRequestValidationTests
         // Given
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Pass1!",  // 6자
             PasswordConfirm = "Pass1!",
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -114,12 +138,12 @@ public class RegisterRequestValidationTests
         var longPassword = "Password123!" + new string('a', 25);  // 38자
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = longPassword,
             PasswordConfirm = longPassword,
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -135,12 +159,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "password123!",  // 대문자 없음
             PasswordConfirm = "password123!",
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -156,12 +180,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "PASSWORD123!",  // 소문자 없음
             PasswordConfirm = "PASSWORD123!",
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -177,12 +201,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password!",  // 숫자 없음
             PasswordConfirm = "Password!",
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -198,12 +222,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123",  // 특수문자 없음
             PasswordConfirm = "Password123",
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -223,12 +247,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "DifferentPassword123!",  // 불일치
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -244,12 +268,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "",
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -265,12 +289,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",  // 일치
             Nickname = "testuser",
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -290,12 +314,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
             Nickname = "a",  // 1자
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -311,12 +335,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
             Nickname = "thisistoolongnickname",  // 21자
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // When
@@ -335,12 +359,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
             Nickname = nickname,
             Phone = "010-1234-5678",
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // Act
@@ -368,12 +392,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
             Nickname = "testuser",
             Phone = phone,
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // Act
@@ -394,12 +418,12 @@ public class RegisterRequestValidationTests
         // Arrange
         var request = new RegisterRequest
         {
-            Email = "test@example.com",
+            Email = "test@test.com",
+            SessionToken = "valid-session-token",
             Password = "Password123!",
             PasswordConfirm = "Password123!",
             Nickname = "testuser",
             Phone = phone,
-            FirebaseIdToken = "firebase-id-token"
         };
 
         // Act
@@ -411,28 +435,4 @@ public class RegisterRequestValidationTests
 
     #endregion
 
-    #region FirebaseIdToken Validation Tests
-
-    [Fact]
-    public void RegisterRequest_ShouldFail_WhenFirebaseIdTokenIsEmpty()
-    {
-        // Given
-        var request = new RegisterRequest
-        {
-            Email = "test@example.com",
-            Password = "Password123!",
-            PasswordConfirm = "Password123!",
-            Nickname = "testuser",
-            Phone = "010-1234-5678",
-            FirebaseIdToken = ""
-        };
-
-        // When
-        var results = ValidateModel(request);
-
-        // Then
-        Assert.Contains(results, r => r.ErrorMessage!.Contains("Firebase id token is required"));
-    }
-
-    #endregion
 }

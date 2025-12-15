@@ -2,8 +2,6 @@ using DotNetEnv;
 using Microsoft.EntityFrameworkCore;
 using api.Data;
 using api.Services;
-using FirebaseAdmin;
-using Google.Apis.Auth.OAuth2;
 
 // Npgsql DateTime 설정 - UTC를 timestamp without time zone에 쓸 수 있도록
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
@@ -47,23 +45,26 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 // Register custom services
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IUserService, UserService>();
-builder.Services.AddScoped<IFirebaseService, FirebaseService>();
+builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<ITokenService, TokenService>();
+
+// Add CORS
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        policy.WithOrigins("http://localhost:3000") // Next.js dev server
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
+    });
+});
 
 // Add controllers
 builder.Services.AddControllers();
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
-
-// Firebase
-var keyPath = Path.Combine(Directory.GetCurrentDirectory(), "firebase-key.json");
-
-// Firebase 초기화
-FirebaseApp.Create(new AppOptions()
-{
-    Credential = GoogleCredential.FromFile(keyPath)
-});
 
 var app = builder.Build();
 
@@ -73,7 +74,14 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
+// Use CORS - must be before UseAuthorization
+app.UseCors("AllowFrontend");
+
+// Only use HTTPS redirection in production
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 // Map controllers
 app.MapControllers();
