@@ -1,0 +1,13 @@
+**/.git
+**/.gitignore
+**/.vscode
+**/bin
+**/obj
+**/.env
+**/build_output.txt
+**/*.md
+**/.DS_Store
+**/firebase-key.json
+Dockerfile
+.dockerignore
+docker-compose.yml
