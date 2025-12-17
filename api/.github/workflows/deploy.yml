@@ -4,92 +4,55 @@ on:
   push:
     branches:
       - develop
-      - main
-  workflow_dispatch:  # 수동 실행 가능
+  workflow_dispatch:
 
 jobs:
   deploy:
-    name: Build and Deploy
+    name: Deploy to Server
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub (Optional)
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-        continue-on-error: true  # Docker Hub 없어도 진행
-
-      - name: Build Docker image
+      
+      - name: Setup SSH
         run: |
-          docker build -t riff-api:${{ github.sha }} .
-          docker tag riff-api:${{ github.sha }} riff-api:latest
-
-      - name: Deploy to Server via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          script: |
-            cd ${{ secrets.DEPLOY_PATH }}
-
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+      
+      - name: Deploy to Server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/id_rsa $SSH_USER@$SSH_HOST << 'EOF'
+            set -e
+            
+            # 프로젝트 디렉토리로 이동
+            cd /home/ubuntu/riff-backend
+            
             # 최신 코드 가져오기
-            git fetch origin
-            git checkout ${{ github.ref_name }}
-            git pull origin ${{ github.ref_name }}
-
-            # 기존 컨테이너 중지 및 제거
-            docker-compose down || true
-
-            # 새 이미지 빌드
-            docker-compose build --no-cache
-
-            # 컨테이너 실행
-            docker-compose up -d
-
-            # 사용하지 않는 이미지 정리
-            docker image prune -f
-
-            # 배포 완료 확인
-            echo "Deployment completed at $(date)"
-            docker-compose ps
-
-      - name: Verify Deployment
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          script: |
-            # 헬스체크 (health 엔드포인트가 있다면)
-            sleep 5
-            curl -f http://localhost:8080/health || echo "Health check endpoint not available"
-
-            # 컨테이너 상태 확인
-            docker-compose ps
-
-      - name: Notify Success
-        if: success()
-        run: |
-          echo "✅ Deployment successful!"
-          echo "Branch: ${{ github.ref_name }}"
-          echo "Commit: ${{ github.sha }}"
-          echo "Author: ${{ github.actor }}"
-
-      - name: Notify Failure
-        if: failure()
-        run: |
-          echo "❌ Deployment failed!"
-          echo "Branch: ${{ github.ref_name }}"
-          echo "Commit: ${{ github.sha }}"
-          echo "Author: ${{ github.actor }}"
+            git pull origin develop
+            
+            # Docker 컨테이너 재시작
+            sudo docker compose down
+            sudo docker compose up -d --build
+            
+            # 헬스 체크
+            echo "Waiting for service to start..."
+            sleep 10
+            
+            # 로그 확인
+            sudo docker logs riff-api --tail 50
+            
+            # 헬스 체크
+            curl -f http://localhost:8080/health || exit 1
+            
+            echo "Deployment successful!"
+          EOF
+      
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/id_rsa
