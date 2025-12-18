@@ -53,7 +53,7 @@ jobs:
             sudo docker logs riff-api --tail 50
             
             # 헬스 체크
-            curl -f http://localhost:8080/health || exit 1
+            curl -f curl -f https://riff-api.oouya.xyz/health || exit 1
             
             echo "Deployment successful!"
           EOF
