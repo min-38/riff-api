@@ -40,7 +40,9 @@ jobs:
             cd ./api
             
             # Docker 컨테이너 재시작
-            sudo docker compose down
+            # 기존 컨테이너 완전히 제거
+            sudo docker compose down --remove-orphans
+            sudo docker system prune -f
             sudo docker compose up -d --build
             
             # 헬스 체크
