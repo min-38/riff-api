@@ -31,10 +31,13 @@ jobs:
             set -e
             
             # 프로젝트 디렉토리로 이동
-            cd /home/ubuntu/riff-backend
+            cd /home/ubuntu/riff
             
             # 최신 코드 가져오기
             git pull origin develop
+
+            # api 디렉토리로 이동
+            cd ./api
             
             # Docker 컨테이너 재시작
             sudo docker compose down
