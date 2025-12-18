@@ -31,7 +31,7 @@ jobs:
             set -e
             
             # 프로젝트 디렉토리로 이동
-            cd /home/ubuntu/riff
+            cd /home/ubuntu/docker/riff
             
             # 최신 코드 가져오기
             git pull origin develop
