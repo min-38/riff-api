@@ -65,7 +65,7 @@ public class EmailTestController : ControllerBase
         });
     }
 
-    // 인증 코드 이메일 테스트 발송
+    // 인증 링크 이메일 테스트 발송
     [HttpPost("verification")]
     public async Task<IActionResult> SendVerificationTestEmail()
     {
@@ -82,18 +82,17 @@ public class EmailTestController : ControllerBase
 
         try
         {
-            // 랜덤 6자리 인증 코드 생성
-            var random = new Random();
-            var verificationCode = random.Next(100000, 999999).ToString();
+            // 랜덤 토큰 생성 (테스트용)
+            var verificationToken = Guid.NewGuid().ToString();
 
-            await _emailService.SendVerificationEmailAsync(testEmail, verificationCode);
+            await _emailService.SendVerificationLinkAsync(testEmail, verificationToken);
 
             return Ok(new
             {
                 success = true,
-                message = $"Verification email sent to {testEmail}",
+                message = $"Verification link email sent to {testEmail}",
                 sentTo = testEmail,
-                verificationCode = verificationCode // 개발 환경에서만 반환
+                verificationToken = verificationToken // 개발 환경에서만 반환
             });
         }
         catch (Exception ex)
@@ -141,7 +140,7 @@ public class EmailTestController : ControllerBase
         });
     }
 
-    // 특정 이메일로 인증 코드 테스트 발송
+    // 특정 이메일로 인증 링크 테스트 발송
     [HttpPost("verification-to")]
     public async Task<IActionResult> SendVerificationTestEmailTo([FromBody] SendTestEmailRequest request)
     {
@@ -156,18 +155,17 @@ public class EmailTestController : ControllerBase
 
         try
         {
-            // 랜덤 6자리 인증 코드 생성
-            var random = new Random();
-            var verificationCode = random.Next(100000, 999999).ToString();
+            // 랜덤 토큰 생성 (테스트용)
+            var verificationToken = Guid.NewGuid().ToString();
 
-            await _emailService.SendVerificationEmailAsync(request.Email, verificationCode);
+            await _emailService.SendVerificationLinkAsync(request.Email, verificationToken);
 
             return Ok(new
             {
                 success = true,
-                message = $"Verification email sent to {request.Email}",
+                message = $"Verification link email sent to {request.Email}",
                 sentTo = request.Email,
-                verificationCode = verificationCode // 개발 환경에서만 반환
+                verificationToken = verificationToken // 개발 환경에서만 반환
             });
         }
         catch (Exception ex)

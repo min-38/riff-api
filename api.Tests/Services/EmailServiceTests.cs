@@ -22,7 +22,8 @@ public class EmailServiceTests : IDisposable
             ["SMTP_PASSWORD"] = Environment.GetEnvironmentVariable("SMTP_PASSWORD"),
             ["SMTP_FROM_EMAIL"] = Environment.GetEnvironmentVariable("SMTP_FROM_EMAIL"),
             ["SMTP_FROM_NAME"] = Environment.GetEnvironmentVariable("SMTP_FROM_NAME"),
-            ["SEND_ACTUAL_EMAIL"] = Environment.GetEnvironmentVariable("SEND_ACTUAL_EMAIL")
+            ["SEND_ACTUAL_EMAIL"] = Environment.GetEnvironmentVariable("SEND_ACTUAL_EMAIL"),
+            ["API_URL"] = Environment.GetEnvironmentVariable("API_URL")
         };
     }
 
@@ -51,12 +52,19 @@ public class EmailServiceTests : IDisposable
         var result = await emailService.SendTestEmailAsync("test@test.com");
 
         // Assert
+        // result는 value type이므로 항상 null이 아님
+        #pragma warning disable xUnit2002
         Assert.NotNull(result);
+        #pragma warning restore xUnit2002
     }
 
-    // SEND_ACTUAL_EMAIL=false일 때 인증 메일은 로그만 출력
+    #endregion
+
+    #region SendVerificationLinkAsync Tests
+
+    // SEND_ACTUAL_EMAIL=false일 때 인증 링크 메일은 로그만 출력
     [Fact]
-    public async Task SendVerificationEmail_WhenSendActualEmailIsFalse_ShouldLogOnly()
+    public async Task SendVerificationLinkAsync_WhenSendActualEmailIsFalse_ShouldLogOnly()
     {
         // Arrange
         Environment.SetEnvironmentVariable("SMTP_HOST", "smtp.test.com");
@@ -64,25 +72,26 @@ public class EmailServiceTests : IDisposable
         Environment.SetEnvironmentVariable("SMTP_USERNAME", "test-user");
         Environment.SetEnvironmentVariable("SMTP_PASSWORD", "test-pass");
         Environment.SetEnvironmentVariable("SEND_ACTUAL_EMAIL", "false");
+        Environment.SetEnvironmentVariable("API_URL", "http://localhost:5000");
         var emailService = new EmailService(_loggerMock.Object);
 
         // Act
-        await emailService.SendVerificationEmailAsync("test@test.com", "123456");
+        await emailService.SendVerificationLinkAsync("test@test.com", "test-token-123");
 
         // Assert
         _loggerMock.Verify(
             x => x.Log(
-                LogLevel.Information, // 로그 레벨은 Information이어ㅑ 하고,
-                It.IsAny<EventId>(),  // EventId는 상관없고
-                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("DEV MODE")), // 로그 메시지에 "DEV MODE"가 포함되어야 하고
-                It.IsAny<Exception>(), // Exception은 상관없고
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()), // formatter는 상관없음
-            Times.AtLeastOnce); // 최소 1번 이상 호출되어야 함
+                LogLevel.Information, // 로그 레벨이 Information이어야 하고
+                It.IsAny<EventId>(), // 이벤트 ID는 어떤 것이든 상관없으며
+                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("DEV MODE")), // 메시지에 "DEV MODE"가 포함되어야 하고
+                It.IsAny<Exception>(), // 예외는 어떤 것이든 상관없으며
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()), // 포맷 함수도 어떤 것이든 상관없음
+            Times.AtLeastOnce); // 최소 한 번 이상 호출되었는지 확인
     }
 
     // null 이메일도 SEND_ACTUAL_EMAIL=false면 예외 없이 처리
     [Fact]
-    public async Task SendVerificationEmail_WithNullEmail_WhenSendActualEmailIsFalse_ShouldNotThrow()
+    public async Task SendVerificationLinkAsync_WithNullEmail_WhenSendActualEmailIsFalse_ShouldNotThrow()
     {
         // Arrange
         Environment.SetEnvironmentVariable("SMTP_HOST", "smtp.test.com");
@@ -90,10 +99,11 @@ public class EmailServiceTests : IDisposable
         Environment.SetEnvironmentVariable("SMTP_USERNAME", "test-user");
         Environment.SetEnvironmentVariable("SMTP_PASSWORD", "test-pass");
         Environment.SetEnvironmentVariable("SEND_ACTUAL_EMAIL", "false");
+        Environment.SetEnvironmentVariable("API_URL", "http://localhost:5000");
         var emailService = new EmailService(_loggerMock.Object);
 
-        // Act & Assert - 개발 모드에서는 실제 발송을 안 하므로 예외가 발생하지 않음
-        await emailService.SendVerificationEmailAsync(null!, "123456");
+        // Act & Assert
+        await emailService.SendVerificationLinkAsync(null!, "test-token-123");
 
         // 로그만 출력되었는지 확인
         _loggerMock.Verify(
@@ -108,7 +118,7 @@ public class EmailServiceTests : IDisposable
 
     // 빈 이메일도 SEND_ACTUAL_EMAIL=false면 예외 없이 처리
     [Fact]
-    public async Task SendVerificationEmail_WithEmptyEmail_WhenSendActualEmailIsFalse_ShouldNotThrow()
+    public async Task SendVerificationLinkAsync_WithEmptyEmail_WhenSendActualEmailIsFalse_ShouldNotThrow()
     {
         // Arrange
         Environment.SetEnvironmentVariable("SMTP_HOST", "smtp.test.com");
@@ -116,10 +126,11 @@ public class EmailServiceTests : IDisposable
         Environment.SetEnvironmentVariable("SMTP_USERNAME", "test-user");
         Environment.SetEnvironmentVariable("SMTP_PASSWORD", "test-pass");
         Environment.SetEnvironmentVariable("SEND_ACTUAL_EMAIL", "false");
+        Environment.SetEnvironmentVariable("API_URL", "http://localhost:5000");
         var emailService = new EmailService(_loggerMock.Object);
 
-        // Act & Assert - 개발 모드에서는 실제 발송을 안 하므로 예외가 발생하지 않음
-        await emailService.SendVerificationEmailAsync("", "123456");
+        // Act & Assert
+        await emailService.SendVerificationLinkAsync("", "test-token-123");
 
         // 로그만 출력되었는지 확인
         _loggerMock.Verify(
@@ -134,7 +145,7 @@ public class EmailServiceTests : IDisposable
 
     // 잘못된 형식의 이메일도 SEND_ACTUAL_EMAIL=false면 예외 없이 처리
     [Fact]
-    public async Task SendVerificationEmail_WithInvalidEmailFormat_WhenSendActualEmailIsFalse_ShouldNotThrow()
+    public async Task SendVerificationLinkAsync_WithInvalidEmailFormat_WhenSendActualEmailIsFalse_ShouldNotThrow()
     {
         // Arrange
         Environment.SetEnvironmentVariable("SMTP_HOST", "smtp.test.com");
@@ -142,10 +153,11 @@ public class EmailServiceTests : IDisposable
         Environment.SetEnvironmentVariable("SMTP_USERNAME", "test-user");
         Environment.SetEnvironmentVariable("SMTP_PASSWORD", "test-pass");
         Environment.SetEnvironmentVariable("SEND_ACTUAL_EMAIL", "false");
+        Environment.SetEnvironmentVariable("API_URL", "http://localhost:5000");
         var emailService = new EmailService(_loggerMock.Object);
 
-        // Act & Assert - 개발 모드에서는 실제 발송을 안 하므로 예외가 발생하지 않음
-        await emailService.SendVerificationEmailAsync("invalid-email-format", "123456");
+        // Act & Assert
+        await emailService.SendVerificationLinkAsync("invalid-email-format", "test-token-123");
 
         // 로그만 출력되었는지 확인
         _loggerMock.Verify(

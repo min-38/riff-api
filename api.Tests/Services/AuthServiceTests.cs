@@ -6,6 +6,7 @@ using api.Data;
 using api.DTOs.Requests;
 using api.Models;
 using api.Services;
+using api.Exceptions;
 using DotNetEnv;
 
 namespace api.Tests.Services;
@@ -17,6 +18,8 @@ public class AuthServiceTests : IDisposable
     private readonly Mock<IUserService> _userServiceMock;
     private readonly Mock<IEmailService> _emailServiceMock;
     private readonly Mock<ITokenService> _tokenServiceMock;
+    private readonly Mock<IRedisService> _redisServiceMock;
+    private readonly Mock<ICaptchaService> _captchaServiceMock;
     private ApplicationDbContext _context = null!;
     private AuthService _authService = null!;
 
@@ -29,6 +32,8 @@ public class AuthServiceTests : IDisposable
         _userServiceMock = new Mock<IUserService>();
         _emailServiceMock = new Mock<IEmailService>();
         _tokenServiceMock = new Mock<ITokenService>();
+        _redisServiceMock = new Mock<IRedisService>();
+        _captchaServiceMock = new Mock<ICaptchaService>();
     }
 
     private void InitializeContext()
@@ -44,7 +49,9 @@ public class AuthServiceTests : IDisposable
             _configurationMock.Object,
             _userServiceMock.Object,
             _emailServiceMock.Object,
-            _tokenServiceMock.Object
+            _tokenServiceMock.Object,
+            _redisServiceMock.Object,
+            _captchaServiceMock.Object
         );
     }
 
@@ -54,324 +61,33 @@ public class AuthServiceTests : IDisposable
         _context?.Dispose();
     }
 
-    #region 이메일 인증 요청
+    #region 회원가입 테스트
 
-    // 정상
-    [Fact]
-    public async Task SendVerificationCodeAsync_NewEmail_Success()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "test@test.com";
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync((User?)null);
-        _emailServiceMock.Setup(x => x.SendVerificationEmailAsync(email, It.IsAny<string>()))
-            .Returns(Task.CompletedTask);
-
-        // Act
-        var result = await _authService.SendVerificationCodeAsync(email);
-
-        // Assert
-        Assert.True(result);
-        _emailServiceMock.Verify(x => x.SendVerificationEmailAsync(email, It.IsAny<string>()), Times.Once);
-
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
-        Assert.NotNull(user); // user는 null이 아니어야 하고
-        Assert.False(user.Verified); // 인증되지 않은 상태여야 하며
-        Assert.NotNull(user.VerificationCode); // 코드가 있어야 하고
-        Assert.Equal(6, user.VerificationCode.Length); // 코드의 길이는 6자리 이어야 하고
-        Assert.NotNull(user.VerificationToken); // 토큰이 있어야 한다.
-    }
-
-    // 차단된 이메일일 때
-    [Fact]
-    public async Task SendVerificationCodeAsync_BlockedEmail_ThrowsException()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "test@test.com";
-        var blockedUser = new BlockedUser
-        {
-            Email = email,
-            Reason = "Spam account",
-            BlockedAt = DateTime.UtcNow,
-            ExpiresAt = null
-        };
-        _context.BlockedUsers.Add(blockedUser);
-        await _context.SaveChangesAsync();
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.SendVerificationCodeAsync(email)
-        );
-        Assert.Equal("Spam account", exception.Message);
-    }
-
-    // 이미 인증 받은 이메일이 존재할 때
-    [Fact]
-    public async Task SendVerificationCodeAsync_AlreadyVerifiedEmail_ThrowsException()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "test@test.com";
-        var verifiedUser = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Verified = true,
-            Password = "hashedpassword",
-            Nickname = "testuser",
-            Rating = 0.0,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(verifiedUser);
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.SendVerificationCodeAsync(email)
-        );
-        Assert.Equal("Email already exists", exception.Message);
-    }
-
-    // 5번 시도한 이메일
-    [Fact]
-    public async Task SendVerificationCodeAsync_FiveAttempts_BlocksEmail()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "test@test.com";
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Verified = false,
-            Password = "",
-            Nickname = "",
-            Rating = 0.0,
-            VerificationEmailAttempts = 5,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.SendVerificationCodeAsync(email)
-        );
-        Assert.Contains("temporarily blocked for 24 hours", exception.Message);
-
-        var blockedUser = await _context.BlockedUsers.FirstOrDefaultAsync(bu => bu.Email == email);
-        Assert.NotNull(blockedUser);
-        Assert.Equal("Too many verification attempts", blockedUser.Reason);
-    }
-
-    # endregion
-
-    #region 이메일 인증 응답
-
-    // 정상
-    [Fact]
-    public async Task VerifyEmailCodeAsync_ValidCode_ReturnsSessionToken()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "test@test.com";
-        var code = "123456";
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Verified = false,
-            Password = "",
-            Nickname = "",
-            Rating = 0.0,
-            VerificationCode = code,
-            VerificationToken = "token",
-            VerificationTokenExpiry = DateTime.UtcNow.AddHours(1),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        // Act
-        var sessionToken = await _authService.VerifyEmailCodeAsync(email, code);
-
-        // Assert
-        Assert.NotNull(sessionToken); // 세션 토큰이 있어야 하고
-        Assert.NotEmpty(sessionToken); // 세션 토큰이 빈 값이면 안되고
-        Assert.True(user.Verified); // 인증된 유저로 바뀌어야 하고
-        Assert.Null(user.VerificationCode); // 인증 코드는 null로 변경되고
-        Assert.Null(user.VerificationToken); // 인증 토큰 또한 null로 변경되어야 하고
-        Assert.NotNull(user.RegistrationSessionToken); // 가입 세션 토큰 값은 null이 아니어야 하며
-        Assert.NotNull(user.RegistrationSessionExpiry); // 가입 세션 토큰 유효 시간도 null이 아니어야 하며
-        Assert.Equal(sessionToken, user.RegistrationSessionToken); // 세션 토큰과 가입 세션 토큰 값이 같아야 한다.
-    }
-
-    // 인증코드 틀렸을 때
-    [Fact]
-    public async Task VerifyEmailCodeAsync_InvalidCode_ThrowsException()
-    {
-        // Arrange
-        InitializeContext();
-
-        var email = "test@test.com";
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Verified = false,
-            Password = "",
-            Nickname = "",
-            Rating = 0.0,
-            VerificationCode = "123456",
-            VerificationTokenExpiry = DateTime.UtcNow.AddHours(1),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.VerifyEmailCodeAsync(email, "999999")
-        );
-        Assert.Equal("Invalid verification code", exception.Message);
-    }
-
-    // 만료된 코드일 때
-    [Fact]
-    public async Task VerifyEmailCodeAsync_ExpiredCode_ThrowsException()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "test@test.com";
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Verified = false,
-            Password = "",
-            Nickname = "",
-            Rating = 0.0,
-            VerificationCode = "123456",
-            VerificationTokenExpiry = DateTime.UtcNow.AddHours(-1),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.VerifyEmailCodeAsync(email, "123456")
-        );
-        Assert.Equal("Verification code has expired", exception.Message);
-    }
-
-    #endregion
-
-    #region 닉네임 사용 가능 여부 확인
-
-    // 사용 가능
-    [Fact]
-    public async Task CheckNicknameAvailabilityAsync_Available_ReturnsTrue()
-    {
-        // Arrange
-        InitializeContext();
-        var nickname = "newuser";
-        _userServiceMock.Setup(x => x.GetUserByNicknameAsync(nickname))
-            .ReturnsAsync((User?)null);
-
-        // Act
-        var result = await _authService.CheckNicknameAvailabilityAsync(nickname);
-
-        // Assert
-        Assert.True(result);
-    }
-
-    // 이미 존재하는 닉네임일 때
-    [Fact]
-    public async Task CheckNicknameAvailabilityAsync_AlreadyExists_ReturnsFalse()
-    {
-        // Arrange
-        InitializeContext();
-        var nickname = "test";
-        var existingUser = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = "test@test.com",
-            Nickname = nickname,
-            Verified = true,
-            Password = "hashedpassword",
-            Rating = 0.0,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByNicknameAsync(nickname))
-            .ReturnsAsync(existingUser);
-
-        // Act
-        var result = await _authService.CheckNicknameAvailabilityAsync(nickname);
-
-        // Assert
-        Assert.False(result);
-    }
-
-    #endregion
-
-    #region 이메일 인증, 닉네임 확인까지 끝낸 후, 실제 회원가입
-
-    // 정상
+    // 정상 회원가입
     [Fact]
     public async Task RegisterAsync_ValidRequest_Success()
     {
         // Arrange
         InitializeContext();
         var email = "test@test.com";
-        var sessionToken = "valid_session_token";
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Nickname = "",
-            Verified = true,
-            Password = "",
-            Rating = 0.0,
-            RegistrationSessionToken = sessionToken,
-            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(30),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _context.Users.Add(user);
-        await _context.SaveChangesAsync();
 
         _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-        _userServiceMock.Setup(x => x.GetUserByNicknameAsync(It.IsAny<string>()))
             .ReturnsAsync((User?)null);
-        _userServiceMock.Setup(x => x.GetUserByPhoneAsync(It.IsAny<string>()))
+        _userServiceMock.Setup(x => x.GetUserByNicknameAsync("testuser"))
             .ReturnsAsync((User?)null);
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()))
+            .Returns(Task.CompletedTask);
 
         var request = new RegisterRequest
         {
             Email = email,
-            SessionToken = sessionToken,
             Password = "Password123!",
             PasswordConfirm = "Password123!",
-            Nickname = "test",
-            Phone = "010-1234-5678"
+            Nickname = "testuser",
+            Phone = "010-1234-5678",
+            TermsOfServiceAgreed = true,
+            PrivacyPolicyAgreed = true,
+            MarketingAgreed = false
         };
 
         // Act
@@ -379,139 +95,307 @@ public class AuthServiceTests : IDisposable
 
         // Assert
         Assert.NotNull(response);
+        Assert.Equal(email, response.Email);
+        Assert.Contains("check your email", response.Message);
+        Assert.NotNull(response.VerificationToken);
+        Assert.NotEmpty(response.VerificationToken);
+
+        // DB에 미인증 User가 생성되었는지 확인
+        var createdUser = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+        Assert.NotNull(createdUser);
+        Assert.Equal("testuser", createdUser.Nickname);
+        Assert.False(createdUser.Verified); // 미인증 상태
+        Assert.NotNull(createdUser.EmailVerificationToken);
+        Assert.NotNull(createdUser.EmailVerificationExpiry);
+        Assert.True(createdUser.EmailVerificationExpiry > DateTime.UtcNow);
+
+        // 이메일이 발송되었는지 확인
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()), Times.Once);
+    }
+
+    // 이메일 중복
+    [Fact]
+    public async Task RegisterAsync_DuplicateEmail_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var existingUser = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Verified = true,
+            Password = "hashedpassword",
+            Nickname = "test",
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(existingUser);
+
+        var request = new RegisterRequest
+        {
+            Email = email,
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "newuser",
+            TermsOfServiceAgreed = true,
+            PrivacyPolicyAgreed = true
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.RegisterAsync(request)
+        );
+        Assert.Equal("Email already exists", exception.Message);
+    }
+
+    // 만료된 미인증 계정 삭제 후 재가입 성공
+    [Fact]
+    public async Task RegisterAsync_ExpiredUnverifiedAccount_DeletesAndCreatesNew()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var expiredUser = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Verified = false,
+            EmailVerificationToken = "old_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(-1), // 만료됨
+            Password = "oldpassword",
+            Nickname = "oldnickname",
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow.AddDays(-1),
+            UpdatedAt = DateTime.UtcNow.AddDays(-1)
+        };
+
+        _context.Users.Add(expiredUser);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(expiredUser);
+        _userServiceMock.Setup(x => x.GetUserByNicknameAsync("newuser"))
+            .ReturnsAsync((User?)null);
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()))
+            .Returns(Task.CompletedTask);
+
+        var request = new RegisterRequest
+        {
+            Email = email,
+            Password = "NewPassword123!",
+            PasswordConfirm = "NewPassword123!",
+            Nickname = "newuser",
+            TermsOfServiceAgreed = true,
+            PrivacyPolicyAgreed = true
+        };
+
+        // Act
+        var response = await _authService.RegisterAsync(request);
+
+        // Assert
+        Assert.NotNull(response);
+        var remainingUsers = await _context.Users.Where(u => u.Email == email).ToListAsync();
+        Assert.Single(remainingUsers); // 하나만 있어야 함
+        Assert.Equal("newuser", remainingUsers[0].Nickname);
+    }
+
+    // 닉네임 중복
+    [Fact]
+    public async Task RegisterAsync_DuplicateNickname_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var existingUser = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "other@test.com",
+            Nickname = "existingnick",
+            Verified = true,
+            Password = "hashedpassword",
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(It.IsAny<string>()))
+            .ReturnsAsync((User?)null);
+        _userServiceMock.Setup(x => x.GetUserByNicknameAsync("existingnick"))
+            .ReturnsAsync(existingUser);
+
+        var request = new RegisterRequest
+        {
+            Email = "new@test.com",
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "existingnick",
+            TermsOfServiceAgreed = true,
+            PrivacyPolicyAgreed = true
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.RegisterAsync(request)
+        );
+        Assert.Equal("Nickname already exists", exception.Message);
+    }
+
+    // 약관 미동의
+    [Fact]
+    public async Task RegisterAsync_TermsNotAgreed_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+
+        var request = new RegisterRequest
+        {
+            Email = "test@test.com",
+            Password = "Password123!",
+            PasswordConfirm = "Password123!",
+            Nickname = "testuser",
+            TermsOfServiceAgreed = false, // 미동의
+            PrivacyPolicyAgreed = true
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.RegisterAsync(request)
+        );
+        Assert.Equal("Terms of service agreement is required", exception.Message);
+    }
+
+    #endregion
+
+    #region 이메일 인증 (토큰) 테스트
+
+    // 정상 인증
+    [Fact]
+    public async Task VerifyEmailByTokenAsync_ValidToken_ReturnsAuthResponse()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var token = "valid_token_12345";
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = token,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _tokenServiceMock.Setup(x => x.GenerateAccessToken(user))
+            .Returns("jwt_access_token");
+        _tokenServiceMock.Setup(x => x.GenerateRefreshTokenAsync(user.Id))
+            .ReturnsAsync("jwt_refresh_token");
+
+        Environment.SetEnvironmentVariable("JWT_EXPIRATION_MINUTES", "60");
+
+        // Act
+        var response = await _authService.VerifyEmailByTokenAsync(token);
+
+        // Assert
+        Assert.NotNull(response);
         Assert.Equal(user.Id, response.UserId);
         Assert.Equal(email, response.Email);
-        Assert.Equal("test", response.Nickname);
+        Assert.Equal("testuser", response.Nickname);
         Assert.True(response.Verified);
-        Assert.Null(response.Token);
-        Assert.Null(response.RefreshToken);
+        Assert.Equal("jwt_access_token", response.Token);
+        Assert.Equal("jwt_refresh_token", response.RefreshToken);
+        Assert.NotNull(response.ExpiresAt);
 
-        Assert.Null(user.RegistrationSessionToken);
-        Assert.Null(user.RegistrationSessionExpiry);
-        Assert.NotEmpty(user.Password);
+        // DB 확인
+        var verifiedUser = await _context.Users.FindAsync(user.Id);
+        Assert.NotNull(verifiedUser);
+        Assert.True(verifiedUser.Verified);
+        Assert.Null(verifiedUser.EmailVerificationToken); // 토큰 무효화됨
+        Assert.Null(verifiedUser.EmailVerificationExpiry);
     }
 
-    // 세션 토큰일 틀릴 때
+    // 유효하지 않은 토큰
     [Fact]
-    public async Task RegisterAsync_InvalidSessionToken_ThrowsException()
+    public async Task VerifyEmailByTokenAsync_InvalidToken_ThrowsException()
     {
         // Arrange
         InitializeContext();
-        var email = "test@test.com";
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.VerifyEmailByTokenAsync("invalid_token")
+        );
+        Assert.Equal("Invalid or expired verification link", exception.Message);
+    }
+
+    // 만료된 토큰
+    [Fact]
+    public async Task VerifyEmailByTokenAsync_ExpiredToken_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
         var user = new User
         {
             Id = Guid.NewGuid(),
-            Email = email,
-            Verified = true,
-            Password = "",
-            Nickname = "",
+            Email = "test@test.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "expired_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(-1), // 만료됨
             Rating = 0.0,
-            RegistrationSessionToken = "correct_token",
-            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(30),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
 
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        var request = new RegisterRequest
-        {
-            Email = email,
-            SessionToken = "wrong_token",
-            Password = "Password123!",
-            PasswordConfirm = "Password123!",
-            Nickname = "test"
-        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
 
         // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RegisterAsync(request)
+            () => _authService.VerifyEmailByTokenAsync("expired_token")
         );
-        Assert.Equal("Invalid session token.", exception.Message);
+        Assert.Equal("Invalid or expired verification link", exception.Message);
     }
 
-    // 세션 토큰이 만료되었을 때
+    // 이미 인증된 계정
     [Fact]
-    public async Task RegisterAsync_ExpiredSession_ThrowsException()
+    public async Task VerifyEmailByTokenAsync_AlreadyVerified_ThrowsException()
     {
         // Arrange
         InitializeContext();
-        var email = "test@test.com";
-        var sessionToken = "expired_token";
         var user = new User
         {
             Id = Guid.NewGuid(),
-            Email = email,
-            Verified = true,
-            Password = "",
-            Nickname = "",
+            Email = "test@test.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = true, // 이미 인증됨
+            EmailVerificationToken = "some_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
             Rating = 0.0,
-            RegistrationSessionToken = sessionToken,
-            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(-5),
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
 
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        var request = new RegisterRequest
-        {
-            Email = email,
-            SessionToken = sessionToken,
-            Password = "Password123!",
-            PasswordConfirm = "Password123!",
-            Nickname = "test"
-        };
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
 
         // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RegisterAsync(request)
+            () => _authService.VerifyEmailByTokenAsync("some_token")
         );
-        Assert.Equal("Session expired. Please verify your email again.", exception.Message);
-    }
-
-    // 세션 토큰이 다른 이메일로부터 회원가입을 시도될 때
-    [Fact]
-    public async Task RegisterAsync_DifferentEmailWithValidToken_ThrowsException()
-    {
-        // Arrange
-        InitializeContext();
-        var emailB = "b@test.com"; // 소문자로 저장
-        var AToken = "A_session_token";
-
-        var bob = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = emailB,
-            Verified = true,
-            Password = "",
-            Nickname = "",
-            Rating = 0.0,
-            RegistrationSessionToken = "B_session_token",
-            RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(30),
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(emailB))
-            .ReturnsAsync(bob);
-
-        var request = new RegisterRequest
-        {
-            Email = emailB,
-            SessionToken = AToken,
-            Password = "Password123!",
-            PasswordConfirm = "Password123!",
-            Nickname = "test"
-        };
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RegisterAsync(request)
-        );
-        Assert.Equal("Invalid session token.", exception.Message);
+        Assert.Equal("Invalid or expired verification link", exception.Message);
     }
 
     #endregion
@@ -568,31 +452,45 @@ public class AuthServiceTests : IDisposable
         Assert.NotNull(response.ExpiresAt);
     }
 
-    // 유효하지 않은 이메일
+    // 미인증 계정 로그인 시도
     [Fact]
-    public async Task LogInAsync_InvalidEmail_ThrowsException()
+    public async Task LogInAsync_UnverifiedUser_ThrowsException()
     {
         // Arrange
         InitializeContext();
         var email = "test@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = false, // 미인증
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
 
         _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync((User?)null);
+            .ReturnsAsync(user);
 
         var request = new LoginRequest
         {
             Email = email,
-            Password = "Password123!"
+            Password = password
         };
 
         // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _authService.LogInAsync(request)
         );
-        Assert.Equal("Email or Password is not correct", exception.Message);
+        Assert.Equal("Invalid credentials", exception.Message);
     }
 
-    // 패스워드가 틀렸을 때
+    // 잘못된 비밀번호
     [Fact]
     public async Task LogInAsync_InvalidPassword_ThrowsException()
     {
@@ -626,103 +524,14 @@ public class AuthServiceTests : IDisposable
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _authService.LogInAsync(request)
         );
-        Assert.Equal("Email or Password is not correct", exception.Message);
-    }
-
-    // 인증되지 않은 유저일 때
-    [Fact]
-    public async Task LogInAsync_UnverifiedUser_ThrowsException()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "test@test.com";
-        var password = "Password123!";
-        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
-
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Password = hashedPassword,
-            Nickname = "test",
-            Verified = false,
-            Rating = 0.0,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        var request = new LoginRequest
-        {
-            Email = email,
-            Password = password
-        };
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.LogInAsync(request)
-        );
-        Assert.Equal("Account is not verified", exception.Message);
-    }
-
-    // 차단당한 유저일 때
-    [Fact]
-    public async Task LogInAsync_BlockedUser_ThrowsException()
-    {
-        // Arrange
-        InitializeContext();
-        var email = "blocked@example.com";
-        var password = "Password123!";
-        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
-
-        var user = new User
-        {
-            Id = Guid.NewGuid(),
-            Email = email,
-            Password = hashedPassword,
-            Nickname = "test",
-            Verified = true,
-            Rating = 0.0,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
-
-        var blockedUser = new BlockedUser
-        {
-            UserId = user.Id,
-            Email = email,
-            Reason = "Account suspended",
-            BlockedAt = DateTime.UtcNow,
-            ExpiresAt = null
-        };
-
-        _context.Users.Add(user);
-        _context.BlockedUsers.Add(blockedUser);
-        await _context.SaveChangesAsync();
-
-        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
-            .ReturnsAsync(user);
-
-        var request = new LoginRequest
-        {
-            Email = email,
-            Password = password
-        };
-
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.LogInAsync(request)
-        );
-        Assert.Equal("Account suspended", exception.Message);
+        Assert.Equal("Invalid credentials", exception.Message);
     }
 
     #endregion
 
     #region 로그아웃 테스트
 
-    // 정상적인 로그아웃
+    // 정상 로그아웃
     [Fact]
     public async Task LogOutAsync_ValidRefreshToken_Success()
     {
@@ -754,61 +563,303 @@ public class AuthServiceTests : IDisposable
         Assert.NotNull(revokedToken.RevokedAt);
     }
 
-    // refresh token이 없을 때 로그아웃
+    #endregion
+
+    #region 인증 정보 조회 테스트
+
+    // 정상 조회
     [Fact]
-    public async Task LogOutAsync_NoRefreshToken_Success()
+    public async Task GetVerificationInfoAsync_ValidToken_ReturnsInfo()
     {
         // Arrange
         InitializeContext();
+        var email = "test@test.com";
+        var token = "valid_verification_token";
+        var createdAt = DateTime.UtcNow.AddMinutes(-10);
 
-        // Act
-        var result = await _authService.LogOutAsync(null);
-
-        // Assert
-        Assert.True(result);
-    }
-
-    // 존재하지 않은 token이 들어왔을 때
-    [Fact]
-    public async Task LogOutAsync_NonExistentToken_Success()
-    {
-        // Arrange
-        InitializeContext();
-
-        // Act
-        var result = await _authService.LogOutAsync("non_existent_token");
-
-        // Assert
-        Assert.True(result); // 존재하지 않는 토큰이어도 성공 반환
-    }
-
-    // 이미 취소된 token일 때
-    [Fact]
-    public async Task LogOutAsync_AlreadyRevokedToken_Success()
-    {
-        // Arrange
-        InitializeContext();
-        var userId = Guid.NewGuid();
-        var refreshToken = "already_revoked_token";
-
-        var refreshTokenEntity = new RefreshToken
+        var user = new User
         {
             Id = Guid.NewGuid(),
-            Token = refreshToken,
-            UserId = userId,
-            ExpiresAt = DateTime.UtcNow.AddDays(7),
-            CreatedAt = DateTime.UtcNow,
-            RevokedAt = DateTime.UtcNow.AddMinutes(-10) // 이미 무효화됨
+            Email = email,
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = token,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = createdAt,
+            UpdatedAt = DateTime.UtcNow
         };
 
-        _context.RefreshTokens.Add(refreshTokenEntity);
+        _context.Users.Add(user);
         await _context.SaveChangesAsync();
 
         // Act
-        var result = await _authService.LogOutAsync(refreshToken);
+        var response = await _authService.GetVerificationInfoAsync(token);
 
         // Assert
-        Assert.True(result); // 이미 무효화된 토큰이어도 성공 반환
+        Assert.NotNull(response);
+        Assert.Equal(email, response.Email);
+        Assert.Equal(createdAt, response.SentAt);
+    }
+
+    // 유효하지 않은 토큰
+    [Fact]
+    public async Task GetVerificationInfoAsync_InvalidToken_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.GetVerificationInfoAsync("invalid_token")
+        );
+        Assert.Equal("Invalid or expired verification token", exception.Message);
+    }
+
+    // 만료된 토큰
+    [Fact]
+    public async Task GetVerificationInfoAsync_ExpiredToken_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@test.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "expired_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(-1), // 만료됨
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.GetVerificationInfoAsync("expired_token")
+        );
+        Assert.Equal("Invalid or expired verification token", exception.Message);
+    }
+
+    // 이미 인증된 계정
+    [Fact]
+    public async Task GetVerificationInfoAsync_AlreadyVerified_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@test.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = true, // 이미 인증됨
+            EmailVerificationToken = "some_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.GetVerificationInfoAsync("some_token")
+        );
+        Assert.Equal("Invalid or expired verification token", exception.Message);
+    }
+
+    #endregion
+
+    #region 인증 이메일 재전송 테스트
+
+    // 정상 재전송
+    [Fact]
+    public async Task ResendVerificationEmailAsync_ValidToken_Success()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var oldToken = "old_token_12345";
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = oldToken,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _redisServiceMock.Setup(x => x.IncrementAsync(It.IsAny<string>(), It.IsAny<TimeSpan>()))
+            .ReturnsAsync(1); // 첫 번째 시도
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()))
+            .Returns(Task.CompletedTask);
+
+        // Act
+        var response = await _authService.ResendVerificationEmailAsync(oldToken);
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Contains("resent", response.Message);
+
+        // DB에서 토큰과 만료 시간 확인
+        var updatedUser = await _context.Users.FindAsync(user.Id);
+        Assert.NotNull(updatedUser);
+        Assert.Equal(oldToken, updatedUser.EmailVerificationToken); // 토큰은 변경되지 않음
+        Assert.NotNull(updatedUser.EmailVerificationToken);
+        Assert.NotNull(updatedUser.EmailVerificationExpiry);
+        Assert.True(updatedUser.EmailVerificationExpiry > DateTime.UtcNow);
+
+        // Redis rate limiting이 호출되었는지 확인 (일일, 시간당)
+        _redisServiceMock.Verify(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_daily")),
+            TimeSpan.FromHours(24)
+        ), Times.Once);
+        _redisServiceMock.Verify(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_hourly")),
+            TimeSpan.FromHours(1)
+        ), Times.Once);
+        // 이메일이 발송되었는지 확인
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()), Times.Once);
+    }
+
+    // Rate limit 초과
+    [Fact]
+    public async Task ResendVerificationEmailAsync_ExceedsRateLimit_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var token = "valid_token_12345";
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = token,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _redisServiceMock.Setup(x => x.IncrementAsync(It.IsAny<string>(), It.IsAny<TimeSpan>()))
+            .ReturnsAsync(6); // 6번째 시도 (제한 초과)
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<RateLimitException>(
+            () => _authService.ResendVerificationEmailAsync(token)
+        );
+        Assert.Contains("Too many resend attempts", exception.Message);
+
+        // 이메일이 발송되지 않았는지 확인
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+    }
+
+    // 유효하지 않은 토큰 (토큰 검증 실패 시 Redis 호출 안됨)
+    [Fact]
+    public async Task ResendVerificationEmailAsync_InvalidToken_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.ResendVerificationEmailAsync("invalid_token")
+        );
+        Assert.Equal("Invalid or expired verification token", exception.Message);
+
+        // Redis가 호출되지 않았는지 확인 (토큰 검증 전에 실패)
+        _redisServiceMock.Verify(x => x.IncrementAsync(It.IsAny<string>(), It.IsAny<TimeSpan>()), Times.Never);
+    }
+
+    // 만료된 토큰 (토큰 검증 실패 시 Redis 호출 안됨)
+    [Fact]
+    public async Task ResendVerificationEmailAsync_ExpiredToken_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@test.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "expired_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(-1), // 만료됨
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.ResendVerificationEmailAsync("expired_token")
+        );
+        Assert.Equal("Invalid or expired verification token", exception.Message);
+
+        // Redis가 호출되지 않았는지 확인 (토큰 검증 전에 실패)
+        _redisServiceMock.Verify(x => x.IncrementAsync(It.IsAny<string>(), It.IsAny<TimeSpan>()), Times.Never);
+    }
+
+    // 이미 인증된 계정 (토큰 검증 실패 시 Redis 호출 안됨)
+    [Fact]
+    public async Task ResendVerificationEmailAsync_AlreadyVerified_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@test.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = true, // 이미 인증됨
+            EmailVerificationToken = "some_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.ResendVerificationEmailAsync("some_token")
+        );
+        Assert.Equal("Invalid or expired verification token", exception.Message);
+
+        // Redis가 호출되지 않았는지 확인 (토큰 검증 전에 실패)
+        _redisServiceMock.Verify(x => x.IncrementAsync(It.IsAny<string>(), It.IsAny<TimeSpan>()), Times.Never);
     }
 
     #endregion
@@ -856,40 +907,298 @@ public class AuthServiceTests : IDisposable
         Assert.True(response.Verified);
     }
 
-    // 올바르지 않은 token일 때
+    #endregion
+
+    #region ResendVerificationEmailAsync - CAPTCHA Tests
+
     [Fact]
-    public async Task RefreshAccessTokenAsync_InvalidToken_ThrowsException()
+    public async Task ResendVerificationEmailAsync_LessThan3Attempts_NoCaptchaRequired()
     {
         // Arrange
         InitializeContext();
 
-        _tokenServiceMock
-            .Setup(x => x.RefreshAccessTokenAsync(It.IsAny<string>()))
-            .ThrowsAsync(new InvalidOperationException("Invalid refresh token"));
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@example.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "valid-token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        await _context.Users.AddAsync(user);
+        await _context.SaveChangesAsync();
 
-        // Act & Assert
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RefreshAccessTokenAsync("invalid_token")
-        );
-        Assert.Equal("Invalid refresh token", exception.Message);
+        // Mock Redis: 2번째 시도 (CAPTCHA 불필요)
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_daily")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(2);
+
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_hourly")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(2);
+
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>()
+        )).Returns(Task.CompletedTask);
+
+        // Act
+        var response = await _authService.ResendVerificationEmailAsync("valid-token", null);
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Equal("Verification email has been resent. Please check your email.", response.Message);
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(
+            user.Email,
+            It.IsAny<string>()
+        ), Times.Once);
+        // CAPTCHA가 필요 없으므로 호출되지 않아야 함
+        _captchaServiceMock.Verify(x => x.VerifyTurnstileTokenAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>()
+        ), Times.Never);
     }
 
-    // 만료된 token일 때
     [Fact]
-    public async Task RefreshAccessTokenAsync_ExpiredToken_ThrowsException()
+    public async Task ResendVerificationEmailAsync_3rdAttempt_NoCaptchaToken_ThrowsException()
     {
         // Arrange
         InitializeContext();
 
-        _tokenServiceMock
-            .Setup(x => x.RefreshAccessTokenAsync(It.IsAny<string>()))
-            .ThrowsAsync(new InvalidOperationException("Refresh token is expired or revoked"));
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@example.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "valid-token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        await _context.Users.AddAsync(user);
+        await _context.SaveChangesAsync();
+
+        // Mock Redis: 3번째 시도 (CAPTCHA 필요)
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_daily")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(3);
+
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_hourly")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(3);
 
         // Act & Assert
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _authService.RefreshAccessTokenAsync("expired_token")
+            () => _authService.ResendVerificationEmailAsync("valid-token", null)
         );
-        Assert.Equal("Refresh token is expired or revoked", exception.Message);
+
+        Assert.Contains("CAPTCHA verification is required", exception.Message);
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>()
+        ), Times.Never);
+    }
+
+    [Fact]
+    public async Task ResendVerificationEmailAsync_3rdAttempt_ValidCaptcha_Success()
+    {
+        // Arrange
+        InitializeContext();
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@example.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "valid-token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        await _context.Users.AddAsync(user);
+        await _context.SaveChangesAsync();
+
+        // Mock Redis: 3번째 시도
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_daily")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(3);
+
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_hourly")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(3);
+
+        // Mock CAPTCHA: 유효한 토큰
+        _captchaServiceMock.Setup(x => x.VerifyTurnstileTokenAsync(
+            "valid-captcha-token",
+            It.IsAny<string>()
+        )).ReturnsAsync(true);
+
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>()
+        )).Returns(Task.CompletedTask);
+
+        // Act
+        var response = await _authService.ResendVerificationEmailAsync("valid-token", "valid-captcha-token");
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Equal("Verification email has been resent. Please check your email.", response.Message);
+        _captchaServiceMock.Verify(x => x.VerifyTurnstileTokenAsync(
+            "valid-captcha-token",
+            It.IsAny<string>()
+        ), Times.Once);
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(
+            user.Email,
+            It.IsAny<string>()
+        ), Times.Once);
+    }
+
+    [Fact]
+    public async Task ResendVerificationEmailAsync_3rdAttempt_InvalidCaptcha_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@example.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "valid-token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        await _context.Users.AddAsync(user);
+        await _context.SaveChangesAsync();
+
+        // Mock Redis: 3번째 시도
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_daily")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(3);
+
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_hourly")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(3);
+
+        // Mock CAPTCHA: 유효하지 않은 토큰
+        _captchaServiceMock.Setup(x => x.VerifyTurnstileTokenAsync(
+            "invalid-captcha-token",
+            It.IsAny<string>()
+        )).ReturnsAsync(false);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.ResendVerificationEmailAsync("valid-token", "invalid-captcha-token")
+        );
+
+        Assert.Contains("CAPTCHA verification failed", exception.Message);
+        _captchaServiceMock.Verify(x => x.VerifyTurnstileTokenAsync(
+            "invalid-captcha-token",
+            It.IsAny<string>()
+        ), Times.Once);
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>()
+        ), Times.Never);
+    }
+
+    [Fact]
+    public async Task ResendVerificationEmailAsync_HourlyRateLimitExceeded_ThrowsRateLimitException()
+    {
+        // Arrange
+        InitializeContext();
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@example.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "valid-token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        await _context.Users.AddAsync(user);
+        await _context.SaveChangesAsync();
+
+        // Mock Redis: 일일 제한 통과, 시간당 제한 초과
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_daily")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(5);
+
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_hourly")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(6); // 5번 초과
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<RateLimitException>(
+            () => _authService.ResendVerificationEmailAsync("valid-token", null)
+        );
+
+        Assert.Contains("Too many resend attempts", exception.Message);
+        Assert.Contains("1 hour", exception.Message);
+        Assert.Equal(3600, exception.RemainingSeconds);
+    }
+
+    [Fact]
+    public async Task ResendVerificationEmailAsync_DailyRateLimitExceeded_ThrowsRateLimitException()
+    {
+        // Arrange
+        InitializeContext();
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = "test@example.com",
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = "valid-token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(1),
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        await _context.Users.AddAsync(user);
+        await _context.SaveChangesAsync();
+
+        // Mock Redis: 일일 제한 초과
+        _redisServiceMock.Setup(x => x.IncrementAsync(
+            It.Is<string>(k => k.Contains("resend_email_daily")),
+            It.IsAny<TimeSpan>()
+        )).ReturnsAsync(16); // 15번 초과
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<RateLimitException>(
+            () => _authService.ResendVerificationEmailAsync("valid-token", null)
+        );
+
+        Assert.Contains("Too many resend attempts today", exception.Message);
+        Assert.Contains("tomorrow", exception.Message);
+        Assert.Equal(86400, exception.RemainingSeconds);
     }
 
     #endregion

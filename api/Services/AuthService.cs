@@ -7,6 +7,8 @@ using api.Data;
 using api.Models;
 using api.DTOs.Requests;
 using api.DTOs.Responses;
+using api.Exceptions;
+using api.Utils;
 using BCrypt.Net;
 
 namespace api.Services;
@@ -19,6 +21,8 @@ public class AuthService : IAuthService
     private readonly IUserService _userService;
     private readonly IEmailService _emailService;
     private readonly ITokenService _tokenService;
+    private readonly IRedisService _redisService;
+    private readonly ICaptchaService _captchaService;
 
     public AuthService
     (
@@ -27,7 +31,9 @@ public class AuthService : IAuthService
         IConfiguration configuration,
         IUserService userService,
         IEmailService emailService,
-        ITokenService tokenService
+        ITokenService tokenService,
+        IRedisService redisService,
+        ICaptchaService captchaService
     )
     {
         _context = context;
@@ -36,207 +42,88 @@ public class AuthService : IAuthService
         _userService = userService;
         _emailService = emailService;
         _tokenService = tokenService;
+        _redisService = redisService;
+        _captchaService = captchaService;
     }
 
-    // 이메일 인증 요청
-    public async Task<bool> SendVerificationCodeAsync(string email)
+    // 회원가입 처리
+    public async Task<RegisterResponse> RegisterAsync(RegisterRequest request)
     {
         // 이메일을 소문자로 정규화
-        email = email.ToLower();
+        request.Email = request.Email.ToLower();
 
-        // 1. 차단된 이메일인지 체크
+        // 차단된 이메일인지 체크
         var blockedByEmail = await _context.BlockedUsers
-            .FirstOrDefaultAsync(bu => bu.Email == email && (bu.ExpiresAt == null || bu.ExpiresAt > DateTime.UtcNow));
+            .FirstOrDefaultAsync(bu => bu.Email == request.Email && (bu.ExpiresAt == null || bu.ExpiresAt > DateTime.UtcNow));
 
         if (blockedByEmail != null)
         {
             var reason = string.IsNullOrEmpty(blockedByEmail.Reason)
                 ? "This email has been blocked"
                 : blockedByEmail.Reason;
+
+            if (blockedByEmail.ExpiresAt.HasValue)
+                reason += $". Access will be restored at {blockedByEmail.ExpiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC";
+
             throw new InvalidOperationException(reason);
         }
 
-        // 2. 이미 인증된 이메일인지 체크
-        var existingUser = await _userService.GetUserByEmailAsync(email);
-        if (existingUser != null && existingUser.Verified)
-            throw new InvalidOperationException("Email already exists");
-
-        // 3. 미인증 유저가 있으면 재사용, 없으면 새로 생성
-        User user;
-        if (existingUser != null && !existingUser.Verified)
+        // 이메일 중복 확인
+        var existingUser = await _userService.GetUserByEmailAsync(request.Email);
+        if (existingUser != null)
         {
-            // 기존 미인증 유저 재사용
-            user = existingUser;
-            _logger.LogInformation("Reusing unverified user for verification: {Email}", email);
-        }
-        else
-        {
-            // 새 유저 생성 (임시)
-            user = new User
+            // 미인증 계정이고 만료된 경우 삭제
+            if (!existingUser.Verified && existingUser.EmailVerificationExpiry.HasValue &&
+                existingUser.EmailVerificationExpiry.Value < DateTime.UtcNow)
             {
-                Id = Guid.NewGuid(),
-                Email = email,
-                Password = "", // 아직 설정 안됨
-                Nickname = "", // 아직 설정 안됨
-                Phone = null,
-                Verified = false,
-                Rating = 0.0,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-            _context.Users.Add(user);
-        }
-
-        // 마지막 발송 후 5분 이내면 거부 (Rate Limiting)
-        if (user.LastVerificationEmailSentAt.HasValue)
-        {
-            var timeSinceLastEmail = DateTime.UtcNow - user.LastVerificationEmailSentAt.Value;
-            if (timeSinceLastEmail.TotalMinutes < 5)
+                _context.Users.Remove(existingUser);
+                await _context.SaveChangesAsync();
+                _logger.LogInformation("Expired unverified account deleted: {Email}", request.Email);
+            }
+            else
             {
-                var remainingSeconds = (int)(300 - timeSinceLastEmail.TotalSeconds);
-                var remainingMinutes = remainingSeconds / 60;
-                var remainingSecondsOnly = remainingSeconds % 60;
-                throw new InvalidOperationException($"Please wait {remainingMinutes}m {remainingSecondsOnly}s before requesting another verification email");
+                throw new InvalidOperationException("Email already exists");
             }
         }
-
-        // 5번 시도 초과 시 차단
-        if (user.VerificationEmailAttempts >= 5)
-        {
-            // 이메일을 차단 목록에 추가 (24시간 차단)
-            var newBlockedUser = new BlockedUser
-            {
-                UserId = null, // 이메일 자체를 차단
-                Email = email,
-                Reason = "Too many verification attempts",
-                BlockedAt = DateTime.UtcNow,
-                ExpiresAt = DateTime.UtcNow.AddHours(24),
-                BlockedBy = "system"
-            };
-            _context.BlockedUsers.Add(newBlockedUser);
-            await _context.SaveChangesAsync();
-
-            _logger.LogWarning("Email {Email} has been blocked due to too many verification attempts", email);
-            throw new InvalidOperationException("Maximum verification email attempts exceeded. This email has been temporarily blocked for 24 hours.");
-        }
-
-        // 인증 토큰 및 코드 생성
-        var verificationToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-        var verificationCode = GenerateVerificationCode();
-
-        user.VerificationToken = verificationToken;
-        user.VerificationCode = verificationCode;
-        user.VerificationTokenExpiry = DateTime.UtcNow.AddHours(24);
-        user.LastVerificationEmailSentAt = DateTime.UtcNow;
-        user.VerificationEmailAttempts = user.VerificationEmailAttempts + 1;
-        user.UpdatedAt = DateTime.UtcNow;
-
-        await _context.SaveChangesAsync();
-
-        // 이메일 발송
-        await _emailService.SendVerificationEmailAsync(user.Email, verificationCode);
-        _logger.LogInformation("Verification email sent to {Email} (Attempt {Attempts}/5)", user.Email, user.VerificationEmailAttempts);
-
-        return true;
-    }
-
-    // 2단계: 이메일 인증 확인
-    public async Task<string> VerifyEmailCodeAsync(string email, string code)
-    {
-        // 이메일을 소문자로 정규화
-        email = email.ToLower();
-
-        var user = await _userService.GetUserByEmailAsync(email);
-
-        if (user == null)
-            throw new InvalidOperationException("User not found");
-
-        if (user.Verified)
-            throw new InvalidOperationException("Email already verified");
-
-        if (user.VerificationCode != code)
-            throw new InvalidOperationException("Invalid verification code");
-
-        if (user.VerificationTokenExpiry < DateTime.UtcNow)
-            throw new InvalidOperationException("Verification code has expired");
-
-        // 이메일 인증 완료 + 일회용 세션 토큰 생성 (30분 유효)
-        var sessionToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-
-        user.Verified = true;
-        user.VerificationToken = null;
-        user.VerificationCode = null;
-        user.VerificationTokenExpiry = null;
-        user.VerificationEmailAttempts = 0;
-        user.RegistrationSessionToken = sessionToken;
-        user.RegistrationSessionExpiry = DateTime.UtcNow.AddMinutes(30);
-        user.UpdatedAt = DateTime.UtcNow;
-
-        await _context.SaveChangesAsync();
-
-        _logger.LogInformation("Email verified for user {Email}, session token generated", user.Email);
-        return sessionToken;
-    }
-
-    // 3단계: 닉네임 중복 체크
-    public async Task<bool> CheckNicknameAvailabilityAsync(string nickname)
-    {
-        var existingUser = await _userService.GetUserByNicknameAsync(nickname);
-        return existingUser == null; // null이면 사용 가능
-    }
-
-    // 4단계: 회원가입 완료
-    public async Task<AuthResponse> RegisterAsync(RegisterRequest request)
-    {
-        // 이메일을 소문자로 정규화
-        request.Email = request.Email.ToLower();
-
-        // 이메일로 유저 조회
-        var user = await _userService.GetUserByEmailAsync(request.Email);
-
-        if (user == null)
-            throw new InvalidOperationException("Email not found. Please verify your email first.");
-
-        if (!user.Verified)
-            throw new InvalidOperationException("Email is not verified. Please verify your email first.");
-
-        // 세션 토큰 검증 (이메일과 토큰이 매칭되어야 함)
-        if (string.IsNullOrEmpty(user.RegistrationSessionToken))
-            throw new InvalidOperationException("Invalid session. Please verify your email again.");
-
-        // 중요: 요청한 이메일의 유저가 가진 세션 토큰과 요청 토큰이 일치해야 함
-        // 다른 이메일로 변경해서 요청하면 해당 이메일 유저의 토큰과 비교되므로 실패
-        if (user.RegistrationSessionToken != request.SessionToken)
-            throw new InvalidOperationException("Invalid session token.");
-
-        if (user.RegistrationSessionExpiry < DateTime.UtcNow)
-            throw new InvalidOperationException("Session expired. Please verify your email again.");
-
-        // 이미 회원가입이 완료된 경우 (Password가 비어있지 않으면)
-        if (!string.IsNullOrEmpty(user.Password))
-            throw new InvalidOperationException("Registration already completed");
 
         // 닉네임 중복 체크
         if (await _userService.GetUserByNicknameAsync(request.Nickname) != null)
             throw new InvalidOperationException("Nickname already exists");
 
-        // 핸드폰 번호 중복 체크 (입력한 경우만)
-        if (!string.IsNullOrEmpty(request.Phone))
-        {
-            if (await _userService.GetUserByPhoneAsync(request.Phone) != null)
-                throw new InvalidOperationException("Phone number already exists");
-        }
+        // 약관 동의 검증
+        if (!request.TermsOfServiceAgreed)
+            throw new InvalidOperationException("Terms of service agreement is required");
+
+        if (!request.PrivacyPolicyAgreed)
+            throw new InvalidOperationException("Privacy policy agreement is required");
 
         // 비밀번호 해싱
         var hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
-        // User 정보 업데이트 + 세션 토큰 삭제
-        user.Password = hashedPassword;
-        user.Nickname = request.Nickname;
-        user.Phone = request.Phone;
-        user.RegistrationSessionToken = null;
-        user.RegistrationSessionExpiry = null;
-        user.UpdatedAt = DateTime.UtcNow;
+        // 이메일 인증 토큰 생성 (24시간 유효)
+        var verificationToken = SecurityHelper.GenerateVerificationToken();
+        var verificationExpiry = DateTime.UtcNow.AddHours(24);
+
+        // 새로운 User 생성
+        var userId = Guid.NewGuid();
+        var user = new User
+        {
+            Id = userId,
+            Email = request.Email,
+            Password = hashedPassword,
+            Nickname = request.Nickname,
+            Phone = request.Phone,
+            Verified = false, // 초기값은 미인증
+            EmailVerificationToken = verificationToken,
+            EmailVerificationExpiry = verificationExpiry,
+            Rating = 0.0,
+            TermsOfServiceAgreed = request.TermsOfServiceAgreed,
+            PrivacyPolicyAgreed = request.PrivacyPolicyAgreed,
+            MarketingAgreed = request.MarketingAgreed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        _context.Users.Add(user);
 
         // UserOAuth 테이블에 이메일 provider 추가
         var userOAuth = new UserOAuth
@@ -251,23 +138,60 @@ public class AuthService : IAuthService
 
         await _context.SaveChangesAsync();
 
-        _logger.LogInformation("User registration completed: {Email}", user.Email);
+        // 이메일 인증 링크 발송
+        await _emailService.SendVerificationLinkAsync(user.Email, verificationToken);
 
-        // 회원가입 성공 응답 (자동 로그인 없음)
+        _logger.LogInformation("User registered (unverified): {Email}", user.Email);
+
+        // 회원가입 성공 응답
+        return new RegisterResponse
+        {
+            Message = "Registration successful. Please check your email to verify your account.",
+            Email = user.Email,
+            VerificationToken = verificationToken // 인증 토큰도 같이 전달
+        };
+    }
+
+    // 이메일 토큰으로 인증 및 자동 로그인
+    public async Task<AuthResponse> VerifyEmailByTokenAsync(string token)
+    {
+        // 토큰으로 사용자 조회 및 검증
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.EmailVerificationToken == token &&
+                                      u.Verified == false &&
+                                      u.EmailVerificationExpiry > DateTime.UtcNow);
+        
+        if (user == null) throw new InvalidOperationException("Invalid or expired verification link");
+
+        // 사용자 인증 완료
+        user.Verified = true;
+        user.EmailVerificationToken = null; // 토큰 재사용 방지
+        user.EmailVerificationExpiry = null;
+        user.UpdatedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("Email verified for user: {Email}", user.Email);
+
+        // JWT 토큰 생성
+        var accessToken = _tokenService.GenerateAccessToken(user);
+        var refreshToken = await _tokenService.GenerateRefreshTokenAsync(user.Id);
+
+        // JWT 만료 시간 가져오기
+        var expirationMinutesStr = Environment.GetEnvironmentVariable("JWT_EXPIRATION_MINUTES") ?? "60";
+        var expirationMinutes = int.Parse(expirationMinutesStr);
+
+        // AuthResponse 반환하여 자동 로그인 처리
         return new AuthResponse
         {
             UserId = user.Id,
             Email = user.Email,
             Nickname = user.Nickname,
-            Verified = user.Verified
+            Verified = user.Verified,
+            Token = accessToken,
+            RefreshToken = refreshToken,
+            ExpiresAt = DateTime.UtcNow.AddMinutes(expirationMinutes)
         };
-    }
-
-    // 6자리 인증 코드 생성
-    private string GenerateVerificationCode()
-    {
-        var random = new Random();
-        return random.Next(100000, 999999).ToString();
     }
 
     // 로그인
@@ -284,12 +208,9 @@ public class AuthService : IAuthService
         var passwordToVerify = user?.Password ?? "$2a$11$InvalidHashToPreventTimingAttack1234567890123456";
         var isPasswordValid = BCrypt.Net.BCrypt.Verify(request.Password, passwordToVerify);
 
-        // 이메일이 없거나 비밀번호가 틀린 경우 동일한 에러 메시지
-        if (user == null || !isPasswordValid)
-            throw new InvalidOperationException("Email or Password is not correct");
-
-        if (!user.Verified)
-            throw new InvalidOperationException("Account is not verified");
+        // 이메일 없음/비밀번호 틀림/미인증 모두 동일한 에러 메시지
+        if (user == null || !isPasswordValid || !user.Verified)
+            throw new InvalidOperationException("Invalid credentials");
 
         // 차단된 유저인지 체크 (user_id로 차단된 경우 또는 email로 차단된 경우)
         var blockedUser = await _context.BlockedUsers
@@ -302,6 +223,11 @@ public class AuthService : IAuthService
             var reason = string.IsNullOrEmpty(blockedUser.Reason)
                 ? "This account has been blocked"
                 : blockedUser.Reason;
+
+            // 일시적 차단이면 만료 시간 추가
+            if (blockedUser.ExpiresAt.HasValue)
+                reason += $". Access will be restored at {blockedUser.ExpiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC";
+
             throw new InvalidOperationException(reason);
         }
 
@@ -367,6 +293,98 @@ public class AuthService : IAuthService
             Token = accessToken,
             RefreshToken = newRefreshToken,
             ExpiresAt = DateTime.UtcNow.AddMinutes(expirationMinutes)
+        };
+    }
+
+    // 인증 토큰으로 인증 정보 조회
+    public async Task<VerificationInfoResponse> GetVerificationInfoAsync(string verificationToken)
+    {
+        // 토큰으로 사용자 조회
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.EmailVerificationToken == verificationToken &&
+                                      u.Verified == false &&
+                                      u.EmailVerificationExpiry > DateTime.UtcNow);
+
+        // 토큰 검증 실패
+        if (user == null)
+            throw new InvalidOperationException("Invalid or expired verification token");
+
+        // 이메일과 전송 시간 반환
+        return new VerificationInfoResponse
+        {
+            Email = user.Email,
+            SentAt = user.CreatedAt
+        };
+    }
+
+    // 인증 이메일 재전송
+    public async Task<ResendVerificationResponse> ResendVerificationEmailAsync(string verificationToken, string? captchaToken = null)
+    {
+        // 토큰으로 사용자 조회
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.EmailVerificationToken == verificationToken &&
+                                      u.Verified == false &&
+                                      u.EmailVerificationExpiry > DateTime.UtcNow);
+
+        // 토큰 검증 실패
+        if (user == null)
+            throw new InvalidOperationException("Invalid or expired verification token");
+
+        // -- Rate Limiting 체크 --
+        // 일일 제한 체크 (24시간에 15번)
+        var dailyRateLimitKey = $"resend_email_daily:{user.Email}";
+        var dailyAttemptCount = await _redisService.IncrementAsync(dailyRateLimitKey, TimeSpan.FromHours(24));
+        if (dailyAttemptCount > 15)
+        {
+            _logger.LogWarning("Daily rate limit exceeded for email resend: {Email} (Attempt {Count})", user.Email, dailyAttemptCount);
+            throw new RateLimitException("Too many resend attempts today. Please try again tomorrow.", 86400); // 24시간 = 86400초
+        }
+
+        // 시간당 제한 체크 (1시간에 5번)
+        var hourlyRateLimitKey = $"resend_email_hourly:{user.Email}";
+        var hourlyAttemptCount = await _redisService.IncrementAsync(hourlyRateLimitKey, TimeSpan.FromHours(1));
+        if (hourlyAttemptCount > 5)
+        {
+            _logger.LogWarning("Hourly rate limit exceeded for email resend: {Email} (Attempt {Count})", user.Email, hourlyAttemptCount);
+            throw new RateLimitException("Too many resend attempts. Please try again in 1 hour.", 3600); // 1시간 = 3600초
+        }
+
+        // 3번 이상 시도 시 CAPTCHA 체크 필수
+        if (hourlyAttemptCount >= 3)
+        {
+            if (string.IsNullOrEmpty(captchaToken))
+            {
+                _logger.LogWarning("CAPTCHA required but not provided: {Email} (Attempt {Count})", user.Email, hourlyAttemptCount);
+                throw new InvalidOperationException("CAPTCHA verification is required after 3 attempts");
+            }
+
+            var isCaptchaValid = await _captchaService.VerifyTurnstileTokenAsync(captchaToken);
+            if (!isCaptchaValid)
+            {
+                _logger.LogWarning("CAPTCHA verification failed: {Email}", user.Email);
+                throw new InvalidOperationException("CAPTCHA verification failed");
+            }
+
+            _logger.LogInformation("CAPTCHA verification successful: {Email}", user.Email);
+        }
+
+        // 만료 시간 연장 (24시간)
+        // 토큰은 변경하지 않음
+        user.EmailVerificationExpiry = DateTime.UtcNow.AddHours(24);
+        user.UpdatedAt = DateTime.UtcNow;
+
+        await _context.SaveChangesAsync();
+
+        // 인증 이메일 재전송 (기존 토큰 사용)
+        await _emailService.SendVerificationLinkAsync(user.Email, user.EmailVerificationToken!);
+
+        _logger.LogInformation("Verification email resent to: {Email} (Hourly: {Hourly}/5, Daily: {Daily}/15)",
+            user.Email, hourlyAttemptCount, dailyAttemptCount);
+
+        // 성공 응답
+        return new ResendVerificationResponse
+        {
+            Message = "Verification email has been resent. Please check your email."
         };
     }
 }

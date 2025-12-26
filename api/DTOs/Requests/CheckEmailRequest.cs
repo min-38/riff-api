@@ -2,7 +2,7 @@ using System.ComponentModel.DataAnnotations;
 
 namespace api.DTOs.Requests;
 
-public class SendVerificationRequest
+public class CheckEmailRequest
 {
     [Required(ErrorMessage = "Email is required")]
     [EmailAddress(ErrorMessage = "Invalid email format")]

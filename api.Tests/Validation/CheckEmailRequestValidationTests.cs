@@ -3,7 +3,7 @@ using api.DTOs.Requests;
 
 namespace api.Tests.Validation;
 
-public class SendVerificationRequestValidationTests
+public class CheckEmailRequestValidationTests
 {
     private List<ValidationResult> ValidateModel(object model)
     {
@@ -13,11 +13,12 @@ public class SendVerificationRequestValidationTests
         return validationResults;
     }
 
+    // 유효한 이메일이면 성공
     [Fact]
-    public void SendVerificationRequest_ShouldPass_WhenEmailIsValid()
+    public void CheckEmailRequest_ShouldPass_WhenEmailIsValid()
     {
         // Arrange
-        var request = new SendVerificationRequest
+        var request = new CheckEmailRequest
         {
             Email = "test@test.com"
         };
@@ -29,11 +30,12 @@ public class SendVerificationRequestValidationTests
         Assert.Empty(results);
     }
 
+    // 이메일이 비어있으면 실패
     [Fact]
-    public void SendVerificationRequest_ShouldFail_WhenEmailIsEmpty()
+    public void CheckEmailRequest_ShouldFail_WhenEmailIsEmpty()
     {
         // Arrange
-        var request = new SendVerificationRequest
+        var request = new CheckEmailRequest
         {
             Email = ""
         };
@@ -45,15 +47,16 @@ public class SendVerificationRequestValidationTests
         Assert.Contains(results, r => r.ErrorMessage == "Email is required");
     }
 
+    // 잘못된 이메일 형식이면 실패
     [Theory]
     [InlineData("invalid-email")]
-    [InlineData("@test.com")]
+    [InlineData("@example.com")]
     [InlineData("test@")]
     [InlineData("test")]
-    public void SendVerificationRequest_ShouldFail_WhenEmailFormatIsInvalid(string invalidEmail)
+    public void CheckEmailRequest_ShouldFail_WhenEmailFormatIsInvalid(string invalidEmail)
     {
         // Arrange
-        var request = new SendVerificationRequest
+        var request = new CheckEmailRequest
         {
             Email = invalidEmail
         };

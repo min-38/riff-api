@@ -8,4 +8,7 @@ public interface IEmailTemplate
 
     // HTML 본문 생성
     string GenerateHtml();
+
+    // Plain text 본문 생성 (스팸 필터 통과 및 HTML 미지원 클라이언트용)
+    string GeneratePlainText();
 }

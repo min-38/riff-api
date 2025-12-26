@@ -94,13 +94,14 @@ public partial class ApplicationDbContext : DbContext
             entity.Property(e => e.Rating).HasColumnName("rating");
             entity.Property(e => e.UpdatedAt).HasDefaultValueSql("now()").HasColumnName("updatedAt");
             entity.Property(e => e.Verified).HasColumnName("verified");
-            entity.Property(e => e.VerificationToken).HasColumnName("verificationToken");
-            entity.Property(e => e.VerificationTokenExpiry).HasColumnName("verificationTokenExpiry");
-            entity.Property(e => e.VerificationCode).HasColumnName("verificationCode");
-            entity.Property(e => e.LastVerificationEmailSentAt).HasColumnName("lastVerificationEmailSentAt");
-            entity.Property(e => e.VerificationEmailAttempts).HasDefaultValue(0).HasColumnName("verificationEmailAttempts");
-            entity.Property(e => e.RegistrationSessionToken).HasColumnName("registrationSessionToken");
-            entity.Property(e => e.RegistrationSessionExpiry).HasColumnName("registrationSessionExpiry");
+            entity.Property(e => e.EmailVerificationToken).HasColumnName("emailVerificationToken");
+            entity.Property(e => e.EmailVerificationExpiry).HasColumnName("emailVerificationExpiry");
+            entity.Property(e => e.TermsOfServiceAgreed).HasColumnName("termsOfServiceAgreed");
+            entity.Property(e => e.PrivacyPolicyAgreed).HasColumnName("privacyPolicyAgreed");
+            entity.Property(e => e.MarketingAgreed).HasColumnName("marketingAgreed");
+
+            // 인덱스 추가 (토큰 검색 성능 향상)
+            entity.HasIndex(e => e.EmailVerificationToken);
         });
 
         modelBuilder.Entity<UserOAuth>(entity =>

@@ -44,9 +44,7 @@ public class EmailService : IEmailService
             var smtpUsername = Environment.GetEnvironmentVariable("SMTP_USERNAME");
 
             if (string.IsNullOrEmpty(smtpHost) || string.IsNullOrEmpty(smtpUsername))
-            {
                 return (false, "SMTP environment variables are not properly configured");
-            }
 
             _logger.LogInformation("Oracle Cloud SMTP is configured - Host: {Host}, Username: {Username}",
                 smtpHost, smtpUsername);
@@ -60,19 +58,7 @@ public class EmailService : IEmailService
         }
     }
 
-    // 이메일 인증 메일 발송 (6자리 코드)
-    public async Task SendVerificationEmailAsync(string toEmail, string verificationCode)
-    {
-        // 템플릿 생성
-        var template = new VerificationEmailTemplate(verificationCode);
-
-        // 이메일 전송
-        await SendEmailAsync(toEmail, template);
-
-        _logger.LogInformation("Verification email sent to {Email}", toEmail);
-    }
-
-    // 공통 이메일 발송 메서드 (템플릿 기반)
+    // 이메일 발송
     private async Task SendEmailAsync(string toEmail, IEmailTemplate template)
     {
         // SEND_ACTUAL_EMAIL 값 확인하여 실제 발송 여부 결정
@@ -102,11 +88,23 @@ public class EmailService : IEmailService
             // 추가 헤더 -> 스팸 필터 통과율 향상
             message.Headers.Add("X-Mailer", "Riff Email Service");
             message.Headers.Add("X-Priority", "3");
+            message.Headers.Add("Importance", "Normal");
+            message.Headers.Add("X-MSMail-Priority", "Normal");
+
+            // 발신자 신뢰성 향상
+            message.Headers.Add("List-Unsubscribe", $"<mailto:{_fromEmail}?subject=unsubscribe>");
+            message.Headers.Add("Precedence", "bulk");
+
+            // Message-ID 자동 생성
+            // MailKit이 자동으로 생성하지만 명시적으로 추가
+            // 이메일 추적 및 스레딩에 도움
+            if (string.IsNullOrEmpty(message.MessageId))
+                message.MessageId = MimeKit.Utils.MimeUtils.GenerateMessageId();
 
             var bodyBuilder = new BodyBuilder
             {
                 HtmlBody = template.GenerateHtml(),
-                TextBody = "Riff 이메일 인증\n\n이메일에 표시된 인증 코드를 입력해주세요.\n이 코드는 5분 동안 유효합니다." // Plain text fallback
+                TextBody = template.GeneratePlainText() // HTML과 일치하는 Plain text 버전
             };
             message.Body = bodyBuilder.ToMessageBody();
 
@@ -180,7 +178,22 @@ public class EmailService : IEmailService
         }
     }
 
-    // TODO: 비밀번호 재설정 이메일 발송 (나중에 구현)
+    // 이메일 인증 링크 발송
+    public async Task SendVerificationLinkAsync(string toEmail, string verificationToken)
+    {
+        var apiUrl = Environment.GetEnvironmentVariable("API_URL") ?? "http://localhost:5000";
+        var verificationUrl = $"{apiUrl}/auth/verify-email/{verificationToken}";
+
+        // 템플릿 생성
+        var template = new VerificationLinkEmailTemplate(verificationUrl);
+
+        // 이메일 전송
+        await SendEmailAsync(toEmail, template);
+
+        _logger.LogInformation("Verification link sent to {Email}", toEmail);
+    }
+
+    // TODO: 비밀번호 재설정 이메일 발송
     public async Task SendPasswordResetEmailAsync(string toEmail, string resetToken)
     {
         _logger.LogInformation("Password reset email would be sent to {Email}", toEmail);

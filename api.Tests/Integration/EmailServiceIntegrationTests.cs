@@ -101,13 +101,13 @@ public class EmailServiceIntegrationTests : IDisposable
 
     #endregion
 
-    #region 실제 인증 메일 발송 테스트
+    #region 실제 인증 링크 메일 발송 테스트
 
-    // 실제 인증 메일 발송 테스트
+    // 실제 인증 링크 메일 발송 테스트
     [Fact]
     [Trait("Category", "Integration")]
     [Trait("Category", "Email")]
-    public async Task SendVerificationEmail_WithValidCredentials_ShouldSucceed()
+    public async Task SendVerificationLink_WithValidCredentials_ShouldSucceed()
     {
         // SEND_ACTUAL_EMAIL가 false면 테스트 건너뜀
         if (!IsActualEmailSendingEnabled())
@@ -116,17 +116,17 @@ public class EmailServiceIntegrationTests : IDisposable
         // Arrange
         var emailService = new EmailService(_loggerMock.Object);
         var testEmail = Environment.GetEnvironmentVariable("TEST_EMAIL") ?? "mindino03@gmail.com";
-        var verificationCode = "123456";
+        var verificationToken = Guid.NewGuid().ToString();
 
         // Act & Assert - 예외가 발생하지 않으면 성공
-        await emailService.SendVerificationEmailAsync(testEmail, verificationCode);
+        await emailService.SendVerificationLinkAsync(testEmail, verificationToken);
 
         // 이메일이 발송되었으면 성공
         _loggerMock.Verify(
             x => x.Log(
                 LogLevel.Information,
                 It.IsAny<EventId>(),
-                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Verification email sent")),
+                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Verification link sent")),
                 It.IsAny<Exception>(),
                 It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
             Times.Once);
@@ -136,11 +136,11 @@ public class EmailServiceIntegrationTests : IDisposable
 
     #region 이메일 내용 검증 테스트
 
-    // 실제 이메일에 올바른 인증 코드가 포함되는지 확인
+    // 실제 이메일에 올바른 인증 토큰이 포함되는지 확인
     [Fact]
     [Trait("Category", "Integration")]
     [Trait("Category", "Email")]
-    public async Task SendVerificationEmail_ShouldContainCorrectCode()
+    public async Task SendVerificationLink_ShouldContainCorrectToken()
     {
         // SEND_ACTUAL_EMAIL가 false면 테스트 건너뜀
         if (!IsActualEmailSendingEnabled())
@@ -152,14 +152,14 @@ public class EmailServiceIntegrationTests : IDisposable
         if (testEmail == "")
             return;
 
-        var verificationCode = "987654";
+        var verificationToken = "test-token-12345";
 
         // Act
-        await emailService.SendVerificationEmailAsync(testEmail, verificationCode);
+        await emailService.SendVerificationLinkAsync(testEmail, verificationToken);
 
         // Assert
-        // 실제 이메일 계정에서 코드가 987654인지 확인
-        Assert.True(true, "Check the email manually to verify the code is 987654");
+        // 실제 이메일 계정에서 토큰이 test-token-12345인지 확인
+        Assert.True(true, "Check the email manually to verify the token is test-token-12345");
     }
 
     #endregion

@@ -1,20 +1,41 @@
 namespace api.Templates.Email;
 
-// 회원가입 이메일 인증 템플릿
-public class VerificationEmailTemplate : IEmailTemplate
+// 회원가입 이메일 인증 템플릿 (URL 링크 기반)
+public class VerificationLinkEmailTemplate : IEmailTemplate
 {
-    private readonly string _verificationCode;
+    private readonly string _verificationUrl;
 
     public string Subject => "이메일 인증 - Riff";
 
-    public VerificationEmailTemplate(string verificationCode)
+    public VerificationLinkEmailTemplate(string verificationUrl)
     {
-        _verificationCode = verificationCode;
+        _verificationUrl = verificationUrl;
+    }
+
+    public string GeneratePlainText()
+    {
+        return $@"Riff 이메일 인증
+
+환영합니다!
+
+안녕하세요 Riff 입니다.
+Riff에 가입해 주셔서 감사합니다.
+
+아래 링크를 클릭하여 이메일 인증을 완료해주세요:
+{_verificationUrl}
+
+주의사항:
+• 이 인증 링크는 24시간 동안만 유효합니다.
+• 메일이 도착하지 않았다면 스팸함을 확인해주세요.
+• 본인이 가입하지 않았다면 이 메일을 무시하세요.
+• 보안을 위해 이 링크를 타인과 공유하지 마세요.
+
+© 2025 Riff. All rights reserved.
+당신의 음악, 우리의 리프";
     }
 
     public string GenerateHtml()
     {
-        var verificationCode = _verificationCode;
         return @$"
             <!DOCTYPE html>
             <html lang='ko'>
@@ -49,14 +70,14 @@ public class VerificationEmailTemplate : IEmailTemplate
                     .header {{
                         text-align: center;
                         padding: 48px 32px 32px;
-                        background: linear-gradient(135deg, rgba(250, 45, 72, 0.05) 0%, rgba(255, 107, 107, 0.05) 100%);
+                        background: linear-gradient(135deg, rgba(20, 184, 166, 0.05) 0%, rgba(13, 148, 136, 0.05) 100%);
                         border-bottom: 1px solid rgba(0, 0, 0, 0.06);
                     }}
 
                     .logo {{
                         font-size: 32px;
                         font-weight: 700;
-                        background: linear-gradient(135deg, #FA2D48, #ff6b6b);
+                        background: linear-gradient(135deg, #14b8a6, #0d9488);
                         -webkit-background-clip: text;
                         -webkit-text-fill-color: transparent;
                         background-clip: text;
@@ -87,40 +108,34 @@ public class VerificationEmailTemplate : IEmailTemplate
                         line-height: 1.8;
                     }}
 
-                    .code-container {{
-                        background: #fff5f5;
-                        border: 2px solid rgba(250, 45, 72, 0.2);
-                        border-radius: 20px;
-                        padding: 32px;
+                    .button-container {{
                         text-align: center;
                         margin: 32px 0;
                     }}
 
-                    .code-label {{
-                        font-size: 12px;
-                        font-weight: 600;
-                        text-transform: uppercase;
-                        letter-spacing: 1.5px;
-                        color: #999999;
-                        margin-bottom: 12px;
+                    .verify-button {{
+                        display: inline-block;
+                        padding: 16px 48px;
+                        background: linear-gradient(135deg, #14b8a6, #0d9488);
+                        color: #ffffff !important;
+                        text-decoration: none;
+                        border-radius: 12px;
+                        font-weight: 700;
+                        font-size: 16px;
+                        box-shadow: 0 4px 12px rgba(20, 184, 166, 0.3);
+                        transition: all 0.3s ease;
                     }}
 
-                    .code {{
-                        font-size: 48px;
-                        font-weight: 800;
-                        letter-spacing: 12px;
-                        background: linear-gradient(135deg, #FA2D48, #ff6b6b);
-                        -webkit-background-clip: text;
-                        -webkit-text-fill-color: transparent;
-                        background-clip: text;
-                        font-family: 'Courier New', monospace;
+                    .verify-button:hover {{
+                        box-shadow: 0 6px 16px rgba(20, 184, 166, 0.4);
+                        transform: translateY(-2px);
                     }}
 
                     .info-box {{
-                        background: #f9f9f9;
-                        border: 1px solid rgba(0, 0, 0, 0.06);
-                        border-radius: 16px;
-                        padding: 24px;
+                        background: #f0fdfa;
+                        border-left: 4px solid #14b8a6;
+                        border-radius: 8px;
+                        padding: 20px;
                         margin-top: 32px;
                     }}
 
@@ -138,10 +153,31 @@ public class VerificationEmailTemplate : IEmailTemplate
                     }}
 
                     .info-icon {{
-                        color: #FA2D48;
+                        color: #14b8a6;
                         margin-right: 8px;
                         flex-shrink: 0;
                         margin-top: 2px;
+                    }}
+
+                    .url-fallback {{
+                        margin-top: 24px;
+                        padding: 16px;
+                        background: #f8f9fa;
+                        border-radius: 8px;
+                        word-break: break-all;
+                        font-size: 12px;
+                        color: #666;
+                    }}
+
+                    .url-fallback-title {{
+                        font-weight: 600;
+                        color: #333;
+                        margin-bottom: 8px;
+                    }}
+
+                    .url-link {{
+                        color: #14b8a6;
+                        word-wrap: break-word;
                     }}
 
                     .footer {{
@@ -179,7 +215,7 @@ public class VerificationEmailTemplate : IEmailTemplate
                         }}
 
                         .logo {{
-                            font-size: 36px;
+                            font-size: 28px;
                         }}
 
                         .content {{
@@ -190,9 +226,9 @@ public class VerificationEmailTemplate : IEmailTemplate
                             font-size: 20px;
                         }}
 
-                        .code {{
-                            font-size: 36px;
-                            letter-spacing: 8px;
+                        .verify-button {{
+                            padding: 14px 36px;
+                            font-size: 15px;
                         }}
 
                         .footer {{
@@ -209,21 +245,25 @@ public class VerificationEmailTemplate : IEmailTemplate
                     </div>
 
                     <div class='content'>
-                        <h1 class='greeting'>안녕하세요!</h1>
+                        <h1 class='greeting'>환영합니다!</h1>
                         <p class='message'>
                             안녕하세요 Riff 입니다.<br>
-                            아래 인증 코드를 입력하여 이메일 인증을 완료해주세요.
+                            Riff에 가입해 주셔서 감사합니다.<br><br>
+                            아래 버튼을 클릭하여 이메일 인증을 완료해주세요.
                         </p>
 
-                        <div class='code-container'>
-                            <div class='code-label'>인증 코드</div>
-                            <div class='code'>{_verificationCode}</div>
+                        <div class='button-container'>
+                            <a href='{_verificationUrl}' class='verify-button'>이메일 인증하기</a>
                         </div>
 
                         <div class='info-box'>
                             <div class='info-item'>
                                 <span class='info-icon'>•</span>
-                                <span>이 코드는 5분 동안 유효합니다.</span>
+                                <span>이 인증 링크는 24시간 동안만 유효합니다.</span>
+                            </div>
+                            <div class='info-item'>
+                                <span class='info-icon'>•</span>
+                                <span>메일이 도착하지 않았다면 스팸함을 확인해주세요.</span>
                             </div>
                             <div class='info-item'>
                                 <span class='info-icon'>•</span>
@@ -231,8 +271,14 @@ public class VerificationEmailTemplate : IEmailTemplate
                             </div>
                             <div class='info-item'>
                                 <span class='info-icon'>•</span>
-                                <span>보안을 위해 이 코드를 타인과 공유하지 마세요.</span>
+                                <span>보안을 위해 이 링크를 타인과 공유하지 마세요.</span>
                             </div>
+                        </div>
+
+                        <div class='url-fallback'>
+                            <div class='url-fallback-title'>버튼이 작동하지 않는 경우:</div>
+                            아래 링크를 복사하여 브라우저에 붙여넣으세요:<br>
+                            <a href='{_verificationUrl}' class='url-link'>{_verificationUrl}</a>
                         </div>
                     </div>
 
