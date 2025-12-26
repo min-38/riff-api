@@ -1,5 +1,7 @@
 # Environment files
 .env
+.env.dev
+.env.prod
 .env.test
 .env.local
 .env.*.local
