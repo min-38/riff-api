@@ -141,6 +141,10 @@ public class AuthService : IAuthService
         // 이메일 인증 링크 발송
         await _emailService.SendVerificationLinkAsync(user.Email, verificationToken);
 
+        // Redis에 마지막 이메일 전송 시간 저장 (60초 쿨다운 시간)
+        var lastSentKey = $"email_verification_last_sent:{user.Email}";
+        await _redisService.SetAsync<string>(lastSentKey, DateTime.UtcNow.ToString("O"), TimeSpan.FromSeconds(60));
+
         _logger.LogInformation("User registered (unverified): {Email}", user.Email);
 
         // 회원가입 성공 응답
@@ -208,11 +212,11 @@ public class AuthService : IAuthService
         var passwordToVerify = user?.Password ?? "$2a$11$InvalidHashToPreventTimingAttack1234567890123456";
         var isPasswordValid = BCrypt.Net.BCrypt.Verify(request.Password, passwordToVerify);
 
-        // 이메일 없음/비밀번호 틀림/미인증 모두 동일한 에러 메시지
-        if (user == null || !isPasswordValid || !user.Verified)
+        // 이메일 없음/비밀번호 틀림
+        if (user == null || !isPasswordValid)
             throw new InvalidOperationException("Invalid credentials");
 
-        // 차단된 유저인지 체크 (user_id로 차단된 경우 또는 email로 차단된 경우)
+        // 차단된 유저인지 먼저 체크 (user_id로 차단된 경우 또는 email로 차단된 경우)
         var blockedUser = await _context.BlockedUsers
             .FirstOrDefaultAsync(bu =>
                 (bu.UserId == user.Id || bu.Email == user.Email) &&
@@ -229,6 +233,76 @@ public class AuthService : IAuthService
                 reason += $". Access will be restored at {blockedUser.ExpiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC";
 
             throw new InvalidOperationException(reason);
+        }
+
+        // 미인증 계정 - verificationToken 포함하여 별도 처리
+        if (!user.Verified)
+        {
+            const int RESEND_COOLDOWN_SECONDS = 60;
+            int? remainingCooldown = null;
+            bool shouldSendEmail = false;
+
+            // Redis에서 마지막 이메일 전송 시간 확인
+            var lastSentKey = $"email_verification_last_sent:{user.Email}";
+            var lastSentTimeStr = await _redisService.GetAsync<string>(lastSentKey);
+
+            if (!string.IsNullOrEmpty(lastSentTimeStr))
+            {
+                // 마지막 전송 시간이 있으면 남은 쿨다운 계산
+                if (DateTime.TryParse(lastSentTimeStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var lastSentTime))
+                {
+                    var elapsed = (DateTime.UtcNow - lastSentTime).TotalSeconds;
+                    remainingCooldown = (int)Math.Max(0, RESEND_COOLDOWN_SECONDS - elapsed);
+
+                    // 쿨다운이 지났으면 이메일 발송 필요
+                    if (remainingCooldown <= 0)
+                    {
+                        shouldSendEmail = true;
+                        remainingCooldown = null;
+                    }
+                }
+            }
+            else
+            {
+                // 마지막 전송 기록이 없으면 발송 필요
+                shouldSendEmail = true;
+            }
+
+            // 인증 토큰이 만료되었거나 없으면 새로 생성
+            if (string.IsNullOrEmpty(user.EmailVerificationToken) ||
+                !user.EmailVerificationExpiry.HasValue ||
+                user.EmailVerificationExpiry.Value < DateTime.UtcNow)
+            {
+                user.EmailVerificationToken = SecurityHelper.GenerateVerificationToken();
+                user.EmailVerificationExpiry = DateTime.UtcNow.AddHours(24);
+                await _context.SaveChangesAsync();
+                shouldSendEmail = true;
+            }
+
+            // 이메일 발송이 필요하고 쿨다운이 아닌 경우에만 발송
+            if (shouldSendEmail)
+            {
+                await _emailService.SendVerificationLinkAsync(user.Email, user.EmailVerificationToken);
+
+                // Redis에 마지막 전송 시간 저장 (60초 쿨다운 시간)
+                await _redisService.SetAsync<string>(lastSentKey, DateTime.UtcNow.ToString("O"), TimeSpan.FromSeconds(RESEND_COOLDOWN_SECONDS));
+
+                // 방금 발송했으므로 쿨다운 60초
+                remainingCooldown = RESEND_COOLDOWN_SECONDS;
+
+                _logger.LogInformation("Verification email sent for unverified login attempt: {Email}", user.Email);
+            }
+            else
+            {
+                _logger.LogInformation("Verification email NOT sent due to cooldown. Remaining: {Remaining}s for {Email}",
+                    remainingCooldown, user.Email);
+            }
+
+            throw new UnverifiedAccountException(
+                "Email verification required",
+                user.EmailVerificationToken,
+                remainingCooldown
+            );
         }
 
         // JWT 토큰 생성
@@ -309,11 +383,31 @@ public class AuthService : IAuthService
         if (user == null)
             throw new InvalidOperationException("Invalid or expired verification token");
 
+        // Redis에서 마지막 이메일 전송 시간 확인
+        int? remainingCooldown = null;
+        var lastSentKey = $"email_verification_last_sent:{user.Email}";
+        var lastSentTimeStr = await _redisService.GetAsync<string>(lastSentKey);
+
+        if (!string.IsNullOrEmpty(lastSentTimeStr))
+        {
+            if (DateTime.TryParse(lastSentTimeStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var lastSentTime))
+            {
+                const int RESEND_COOLDOWN_SECONDS = 60;
+                var elapsed = (DateTime.UtcNow - lastSentTime).TotalSeconds;
+                remainingCooldown = (int)Math.Max(0, RESEND_COOLDOWN_SECONDS - elapsed);
+
+                // 쿨다운이 지났으면 null
+                if (remainingCooldown <= 0)
+                    remainingCooldown = null;
+            }
+        }
+
         // 이메일과 전송 시간 반환
         return new VerificationInfoResponse
         {
             Email = user.Email,
-            SentAt = user.CreatedAt
+            SentAt = user.CreatedAt,
+            RemainingCooldown = remainingCooldown
         };
     }
 
@@ -377,6 +471,10 @@ public class AuthService : IAuthService
 
         // 인증 이메일 재전송 (기존 토큰 사용)
         await _emailService.SendVerificationLinkAsync(user.Email, user.EmailVerificationToken!);
+
+        // Redis에 마지막 이메일 전송 시간 저장 (60초 쿨다운 시간)
+        var lastSentKey = $"email_verification_last_sent:{user.Email}";
+        await _redisService.SetAsync<string>(lastSentKey, DateTime.UtcNow.ToString("O"), TimeSpan.FromSeconds(60));
 
         _logger.LogInformation("Verification email resent to: {Email} (Hourly: {Hourly}/5, Daily: {Daily}/15)",
             user.Email, hourlyAttemptCount, dailyAttemptCount);

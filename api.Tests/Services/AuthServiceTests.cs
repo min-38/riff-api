@@ -111,6 +111,13 @@ public class AuthServiceTests : IDisposable
 
         // 이메일이 발송되었는지 확인
         _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()), Times.Once);
+
+        // Redis에 마지막 전송 시간이 저장되었는지 확인
+        _redisServiceMock.Verify(x => x.SetAsync<string>(
+            It.Is<string>(k => k.Contains("email_verification_last_sent")),
+            It.IsAny<string>(),
+            TimeSpan.FromSeconds(60)
+        ), Times.Once);
     }
 
     // 이메일 중복
@@ -452,9 +459,187 @@ public class AuthServiceTests : IDisposable
         Assert.NotNull(response.ExpiresAt);
     }
 
-    // 미인증 계정 로그인 시도
+    // 미인증 계정 로그인 시도 - 첫 시도 (이메일 발송)
     [Fact]
-    public async Task LogInAsync_UnverifiedUser_ThrowsException()
+    public async Task LogInAsync_UnverifiedUser_FirstAttempt_SendsEmailAndReturnsCooldown()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+        var verificationToken = "verification_token_12345";
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = false, // 미인증
+            EmailVerificationToken = verificationToken,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        // Redis: 마지막 전송 기록 없음
+        _redisServiceMock.Setup(x => x.GetAsync<string>(It.IsAny<string>()))
+            .ReturnsAsync((string?)null);
+
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(email, verificationToken))
+            .Returns(Task.CompletedTask);
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<UnverifiedAccountException>(
+            () => _authService.LogInAsync(request)
+        );
+
+        Assert.Equal("Email verification required", exception.Message);
+        Assert.Equal(verificationToken, exception.VerificationToken);
+        Assert.Equal(60, exception.RemainingCooldown); // 방금 발송했으므로 60초
+
+        // 이메일이 발송되었는지 확인
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(email, verificationToken), Times.Once);
+
+        // Redis에 마지막 전송 시간 저장되었는지 확인
+        _redisServiceMock.Verify(x => x.SetAsync<string>(
+            It.Is<string>(k => k.Contains("email_verification_last_sent")),
+            It.IsAny<string>(),
+            TimeSpan.FromSeconds(60)
+        ), Times.Once);
+    }
+
+    // 미인증 계정 로그인 시도 - 쿨다운 중 (이메일 발송 안함)
+    [Fact]
+    public async Task LogInAsync_UnverifiedUser_DuringCooldown_NoEmailSentReturnsCooldown()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+        var verificationToken = "verification_token_12345";
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = false,
+            EmailVerificationToken = verificationToken,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        // Redis: 30초 전에 이메일 발송됨
+        var lastSentTime = DateTime.UtcNow.AddSeconds(-30);
+        _redisServiceMock.Setup(x => x.GetAsync<string>(It.IsAny<string>()))
+            .ReturnsAsync(lastSentTime.ToString("O"));
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<UnverifiedAccountException>(
+            () => _authService.LogInAsync(request)
+        );
+
+        Assert.Equal("Email verification required", exception.Message);
+        Assert.Equal(verificationToken, exception.VerificationToken);
+        Assert.NotNull(exception.RemainingCooldown);
+        Assert.True(exception.RemainingCooldown > 20 && exception.RemainingCooldown <= 30); // 약 30초 남음
+
+        // 이메일이 발송되지 않았는지 확인
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+    }
+
+    // 미인증 계정 로그인 시도 - 쿨다운 이후 (이메일 재발송)
+    [Fact]
+    public async Task LogInAsync_UnverifiedUser_AfterCooldown_SendsEmailAgain()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+        var verificationToken = "verification_token_12345";
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = false,
+            EmailVerificationToken = verificationToken,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        // Redis: 70초 전에 이메일 발송됨 (쿨다운 지남)
+        var lastSentTime = DateTime.UtcNow.AddSeconds(-70);
+        _redisServiceMock.Setup(x => x.GetAsync<string>(It.IsAny<string>()))
+            .ReturnsAsync(lastSentTime.ToString("O"));
+
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(email, verificationToken))
+            .Returns(Task.CompletedTask);
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<UnverifiedAccountException>(
+            () => _authService.LogInAsync(request)
+        );
+
+        Assert.Equal("Email verification required", exception.Message);
+        Assert.Equal(verificationToken, exception.VerificationToken);
+        Assert.Equal(60, exception.RemainingCooldown); // 방금 발송했으므로 60초
+
+        // 이메일이 발송되었는지 확인
+        _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(email, verificationToken), Times.Once);
+    }
+
+    // 미인증 계정 로그인 시도 - 토큰 만료 시 새 토큰 생성
+    [Fact]
+    public async Task LogInAsync_UnverifiedUser_ExpiredToken_GeneratesNewToken()
     {
         // Arrange
         InitializeContext();
@@ -468,11 +653,82 @@ public class AuthServiceTests : IDisposable
             Email = email,
             Password = hashedPassword,
             Nickname = "test",
-            Verified = false, // 미인증
+            Verified = false,
+            EmailVerificationToken = "old_expired_token",
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(-1), // 만료됨
             Rating = 0.0,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        _redisServiceMock.Setup(x => x.GetAsync<string>(It.IsAny<string>()))
+            .ReturnsAsync((string?)null);
+
+        _emailServiceMock.Setup(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()))
+            .Returns(Task.CompletedTask);
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<UnverifiedAccountException>(
+            () => _authService.LogInAsync(request)
+        );
+
+        // DB에서 새 토큰이 생성되었는지 확인
+        var updatedUser = await _context.Users.FindAsync(user.Id);
+        Assert.NotNull(updatedUser);
+        Assert.NotEqual("old_expired_token", updatedUser.EmailVerificationToken);
+        Assert.NotNull(updatedUser.EmailVerificationExpiry);
+        Assert.True(updatedUser.EmailVerificationExpiry > DateTime.UtcNow);
+
+        // 새 토큰이 예외에 포함되었는지 확인
+        Assert.Equal(updatedUser.EmailVerificationToken, exception.VerificationToken);
+    }
+
+    // 차단된 계정 로그인 시도 (영구 차단)
+    [Fact]
+    public async Task LogInAsync_BlockedUser_Permanent_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "blocked@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = true,
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        var blockedUser = new BlockedUser
+        {
+            UserId = user.Id,
+            Email = email,
+            Reason = "Violation of terms",
+            ExpiresAt = null, // 영구 차단
+            BlockedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        _context.BlockedUsers.Add(blockedUser);
+        await _context.SaveChangesAsync();
 
         _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
             .ReturnsAsync(user);
@@ -487,7 +743,123 @@ public class AuthServiceTests : IDisposable
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => _authService.LogInAsync(request)
         );
-        Assert.Equal("Invalid credentials", exception.Message);
+
+        Assert.Contains("Violation of terms", exception.Message);
+    }
+
+    // 차단된 계정 로그인 시도 (일시적 차단)
+    [Fact]
+    public async Task LogInAsync_BlockedUser_Temporary_ThrowsException()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "blocked@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = true,
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        var expiresAt = DateTime.UtcNow.AddDays(7);
+        var blockedUser = new BlockedUser
+        {
+            UserId = user.Id,
+            Email = email,
+            Reason = "Spam activity",
+            ExpiresAt = expiresAt, // 일시적 차단
+            BlockedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        _context.BlockedUsers.Add(blockedUser);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => _authService.LogInAsync(request)
+        );
+
+        Assert.Contains("Spam activity", exception.Message);
+        Assert.Contains("Access will be restored at", exception.Message);
+    }
+
+    // 차단이 만료된 계정 로그인 성공
+    [Fact]
+    public async Task LogInAsync_ExpiredBlockedUser_Success()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var password = "Password123!";
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(password);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = hashedPassword,
+            Nickname = "test",
+            Verified = true,
+            Rating = 0.0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        // 차단이 만료됨
+        var blockedUser = new BlockedUser
+        {
+            UserId = user.Id,
+            Email = email,
+            Reason = "Old violation",
+            ExpiresAt = DateTime.UtcNow.AddDays(-1), // 이미 만료됨
+            BlockedAt = DateTime.UtcNow.AddDays(-10)
+        };
+
+        _context.Users.Add(user);
+        _context.BlockedUsers.Add(blockedUser);
+        await _context.SaveChangesAsync();
+
+        _userServiceMock.Setup(x => x.GetUserByEmailAsync(email))
+            .ReturnsAsync(user);
+
+        _tokenServiceMock.Setup(x => x.GenerateAccessToken(user))
+            .Returns("jwt_token");
+        _tokenServiceMock.Setup(x => x.GenerateRefreshTokenAsync(user.Id))
+            .ReturnsAsync("refresh_token");
+
+        Environment.SetEnvironmentVariable("JWT_EXPIRATION_MINUTES", "60");
+
+        var request = new LoginRequest
+        {
+            Email = email,
+            Password = password
+        };
+
+        // Act
+        var response = await _authService.LogInAsync(request);
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Equal(user.Id, response.UserId);
+        Assert.Equal(email, response.Email);
     }
 
     // 잘못된 비밀번호
@@ -567,9 +939,9 @@ public class AuthServiceTests : IDisposable
 
     #region 인증 정보 조회 테스트
 
-    // 정상 조회
+    // 정상 조회 - 쿨다운 없음
     [Fact]
-    public async Task GetVerificationInfoAsync_ValidToken_ReturnsInfo()
+    public async Task GetVerificationInfoAsync_ValidToken_NoCooldown_ReturnsInfo()
     {
         // Arrange
         InitializeContext();
@@ -594,6 +966,10 @@ public class AuthServiceTests : IDisposable
         _context.Users.Add(user);
         await _context.SaveChangesAsync();
 
+        // Redis: 마지막 전송 기록 없음
+        _redisServiceMock.Setup(x => x.GetAsync<string>(It.IsAny<string>()))
+            .ReturnsAsync((string?)null);
+
         // Act
         var response = await _authService.GetVerificationInfoAsync(token);
 
@@ -601,6 +977,92 @@ public class AuthServiceTests : IDisposable
         Assert.NotNull(response);
         Assert.Equal(email, response.Email);
         Assert.Equal(createdAt, response.SentAt);
+        Assert.Null(response.RemainingCooldown); // 쿨다운 없음
+    }
+
+    // 정상 조회 - 쿨다운 중
+    [Fact]
+    public async Task GetVerificationInfoAsync_ValidToken_DuringCooldown_ReturnsInfoWithCooldown()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var token = "valid_verification_token";
+        var createdAt = DateTime.UtcNow.AddMinutes(-10);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = token,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = createdAt,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Redis: 45초 전에 이메일 발송됨
+        var lastSentTime = DateTime.UtcNow.AddSeconds(-45);
+        _redisServiceMock.Setup(x => x.GetAsync<string>(It.IsAny<string>()))
+            .ReturnsAsync(lastSentTime.ToString("O"));
+
+        // Act
+        var response = await _authService.GetVerificationInfoAsync(token);
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Equal(email, response.Email);
+        Assert.Equal(createdAt, response.SentAt);
+        Assert.NotNull(response.RemainingCooldown);
+        Assert.True(response.RemainingCooldown > 10 && response.RemainingCooldown <= 15); // 약 15초 남음
+    }
+
+    // 정상 조회 - 쿨다운 만료
+    [Fact]
+    public async Task GetVerificationInfoAsync_ValidToken_ExpiredCooldown_ReturnsInfoWithoutCooldown()
+    {
+        // Arrange
+        InitializeContext();
+        var email = "test@test.com";
+        var token = "valid_verification_token";
+        var createdAt = DateTime.UtcNow.AddMinutes(-10);
+
+        var user = new User
+        {
+            Id = Guid.NewGuid(),
+            Email = email,
+            Password = "hashedpassword",
+            Nickname = "testuser",
+            Verified = false,
+            EmailVerificationToken = token,
+            EmailVerificationExpiry = DateTime.UtcNow.AddHours(12),
+            Rating = 0.0,
+            CreatedAt = createdAt,
+            UpdatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(user);
+        await _context.SaveChangesAsync();
+
+        // Redis: 70초 전에 이메일 발송됨 (쿨다운 만료)
+        var lastSentTime = DateTime.UtcNow.AddSeconds(-70);
+        _redisServiceMock.Setup(x => x.GetAsync<string>(It.IsAny<string>()))
+            .ReturnsAsync(lastSentTime.ToString("O"));
+
+        // Act
+        var response = await _authService.GetVerificationInfoAsync(token);
+
+        // Assert
+        Assert.NotNull(response);
+        Assert.Equal(email, response.Email);
+        Assert.Equal(createdAt, response.SentAt);
+        Assert.Null(response.RemainingCooldown); // 쿨다운 만료되어 null
     }
 
     // 유효하지 않은 토큰
@@ -738,6 +1200,13 @@ public class AuthServiceTests : IDisposable
         ), Times.Once);
         // 이메일이 발송되었는지 확인
         _emailServiceMock.Verify(x => x.SendVerificationLinkAsync(email, It.IsAny<string>()), Times.Once);
+
+        // Redis에 마지막 전송 시간이 저장되었는지 확인
+        _redisServiceMock.Verify(x => x.SetAsync<string>(
+            It.Is<string>(k => k.Contains("email_verification_last_sent")),
+            It.IsAny<string>(),
+            TimeSpan.FromSeconds(60)
+        ), Times.Once);
     }
 
     // Rate limit 초과

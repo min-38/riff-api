@@ -28,7 +28,7 @@ var dbName = Environment.GetEnvironmentVariable("DATABASE_NAME") ?? "riff";
 var dbUser = Environment.GetEnvironmentVariable("DATABASE_USER") ?? "postgres";
 var dbPassword = Environment.GetEnvironmentVariable("DATABASE_PASSWORD") ?? "";
 
-var connectionString = $"Host={dbHost};Port={dbPort};Database={dbName};Username={dbUser};Password={dbPassword}";
+var connectionString = $"Host={dbHost};Port={dbPort};Database={dbName};Username={dbUser};Password={dbPassword};Encoding=UTF8";
 
 // Redis 환경 변수
 var redisHost = Environment.GetEnvironmentVariable("REDIS_HOST");
@@ -102,16 +102,16 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
+// HTTP 요청 파이프라인 구성
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-// Use CORS - must be before UseAuthorization
+// 프론트엔드 도메인에서의 요청 허용
 app.UseCors("AllowFrontend");
 
-// Only use HTTPS redirection in production
+// 배포 환경에서만 HTTPS 리디렉션 사용
 if (!app.Environment.IsDevelopment())
 {
     app.UseHttpsRedirection();

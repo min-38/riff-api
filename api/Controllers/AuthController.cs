@@ -215,6 +215,16 @@ public class AuthController : ControllerBase
             var response = await _authService.LogInAsync(request);
             return Ok(response);
         }
+        catch (UnverifiedAccountException ex)
+        {
+            return StatusCode(403, new
+            {
+                message = ex.Message,
+                verified = false,
+                verificationToken = ex.VerificationToken,
+                remainingCooldown = ex.RemainingCooldown
+            });
+        }
         catch (InvalidOperationException ex)
         {
             return BadRequest(new { message = ex.Message });
