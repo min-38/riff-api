@@ -12,12 +12,14 @@ public class AuthController : ControllerBase
 {
     private readonly IAuthService _authService;
     private readonly IUserService _userService;
+    private readonly IRedisService _redisService;
     private readonly ILogger<AuthController> _logger;
 
-    public AuthController(IAuthService authService, IUserService userService, ILogger<AuthController> logger)
+    public AuthController(IAuthService authService, IUserService userService, IRedisService redisService, ILogger<AuthController> logger)
     {
         _authService = authService;
         _userService = userService;
+        _redisService = redisService;
         _logger = logger;
     }
 
@@ -183,7 +185,11 @@ public class AuthController : ControllerBase
         }
         catch (RateLimitException ex)
         {
-            return StatusCode(429, new { message = ex.Message });
+            return StatusCode(429, new {
+                error = "Too many requests",
+                message = ex.Message,
+                retryAfter = ex.RemainingSeconds
+            });
         }
         catch (InvalidOperationException ex)
         {
@@ -250,6 +256,162 @@ public class AuthController : ControllerBase
         {
             _logger.LogError(ex, "Error during logout");
             return StatusCode(500, new { message = "An error occurred during logout" });
+        }
+    }
+
+    // 패스워드 찾기
+    [HttpPost("forgot-password")]
+    public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request)
+    {
+        if (!ModelState.IsValid)
+        {
+            var errors = ModelState.Values
+                .SelectMany(v => v.Errors)
+                .Select(e => e.ErrorMessage)
+                .ToList();
+            return BadRequest(new { message = "Validation failed", errors });
+        }
+
+        try
+        {
+            var response = await _authService.SendPasswordResetEmailAsync(request.Email, request.CaptchaToken);
+            return Ok(response);
+        }
+        catch (RateLimitException ex)
+        {
+            return StatusCode(429, new {
+                error = "Too many requests",
+                message = ex.Message,
+                retryAfter = ex.RemainingSeconds
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during password reset request");
+            return StatusCode(500, new { message = "An error occurred during password reset request" });
+        }
+    }
+
+    // 비밀번호 재설정 링크 접속 (이메일 링크에서 사용)
+    [HttpGet("reset-password/{token}")]
+    public async Task<IActionResult> ResetPasswordByToken(string token)
+    {
+        var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var rateLimitKey = $"reset_token_verification:{ipAddress}";
+
+        try
+        {
+            // Rate limiting: IP당 1분에 10회 제한 (무차별 대입 공격 방지)
+            var attemptCount = await _redisService.IncrementAsync(rateLimitKey, TimeSpan.FromMinutes(1));
+            if (attemptCount > 10)
+            {
+                _logger.LogWarning("Rate limit exceeded for token verification from IP: {IP} (Attempt {Count})", ipAddress, attemptCount);
+                var frontendUrl = Environment.GetEnvironmentVariable("FRONTEND_URL") ?? "http://localhost:3000";
+                var errorUrl = $"{frontendUrl}/auth/reset-password-error";
+                return Redirect(errorUrl);
+            }
+
+            // 토큰 유효성 검증
+            var response = await _authService.VerifyPasswordResetTokenAsync(token);
+
+            var successUrl = Environment.GetEnvironmentVariable("FRONTEND_URL") ?? "http://localhost:3000";
+            // 프론트엔드 비밀번호 재설정 페이지로 리다이렉트 (토큰 포함)
+            var redirectUrl = $"{successUrl}/auth/reset-password?token={Uri.EscapeDataString(token)}";
+
+            return Redirect(redirectUrl);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "Password reset token validation failed from IP: {IP}", ipAddress);
+            var frontendUrl = Environment.GetEnvironmentVariable("FRONTEND_URL") ?? "http://localhost:3000";
+            var errorUrl = $"{frontendUrl}/auth/reset-password-error";
+            return Redirect(errorUrl);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during password reset token validation from IP: {IP}", ipAddress);
+            var frontendUrl = Environment.GetEnvironmentVariable("FRONTEND_URL") ?? "http://localhost:3000";
+            var errorUrl = $"{frontendUrl}/auth/reset-password-error";
+            return Redirect(errorUrl);
+        }
+    }
+
+    // 비밀번호 재설정 토큰 검증 (API 직접 호출용)
+    [HttpGet("verify-reset-token")]
+    public async Task<IActionResult> VerifyResetToken([FromQuery] string token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return BadRequest(new { message = "Reset token is required" });
+        }
+
+        try
+        {
+            var response = await _authService.VerifyPasswordResetTokenAsync(token);
+            return Ok(response);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during reset token verification");
+            return StatusCode(500, new { message = "An error occurred during token verification" });
+        }
+    }
+
+    // 비밀번호 재설정
+    [HttpPost("reset-password")]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest request)
+    {
+        var ipAddress = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var rateLimitKey = $"reset_password_attempt:{ipAddress}";
+
+        if (!ModelState.IsValid)
+        {
+            var errors = ModelState.Values
+                .SelectMany(v => v.Errors)
+                .Select(e => e.ErrorMessage)
+                .ToList();
+            return BadRequest(new { message = "Validation failed", errors });
+        }
+
+        try
+        {
+            // Rate limiting: IP당 1분에 5회 제한 (무차별 대입 공격 방지)
+            var attemptCount = await _redisService.IncrementAsync(rateLimitKey, TimeSpan.FromMinutes(1));
+            if (attemptCount > 5)
+            {
+                _logger.LogWarning("Rate limit exceeded for password reset from IP: {IP} (Attempt {Count})", ipAddress, attemptCount);
+                return StatusCode(429, new
+                {
+                    error = "Too many requests",
+                    message = "Too many password reset attempts. Please try again later.",
+                    retryAfter = 60
+                });
+            }
+
+            var response = await _authService.ResetPasswordAsync(request.ResetToken, request.NewPassword);
+
+            // 성공 시 rate limit 카운터 삭제
+            await _redisService.DeleteAsync(rateLimitKey);
+
+            return Ok(response);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "Invalid password reset attempt from IP: {IP}", ipAddress);
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during password reset from IP: {IP}", ipAddress);
+            return StatusCode(500, new { message = "An error occurred during password reset" });
         }
     }
 

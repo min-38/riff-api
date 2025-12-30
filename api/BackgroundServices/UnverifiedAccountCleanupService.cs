@@ -49,8 +49,8 @@ public class UnverifiedAccountCleanupService : BackgroundService
         // 24시간 지난 미인증 계정 조회
         var expiredAccounts = await context.Users
             .Where(u => u.Verified == false &&
-                        u.EmailVerificationExpiry.HasValue &&
-                        u.EmailVerificationExpiry.Value < DateTime.UtcNow)
+                        u.EmailVerificationTokenExpiredAt.HasValue &&
+                        u.EmailVerificationTokenExpiredAt.Value < DateTime.UtcNow)
             .ToListAsync();
 
         if (expiredAccounts.Any()) // 만료된 계정이 있으면

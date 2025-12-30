@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 
 namespace api.Utils;
 
@@ -24,5 +25,13 @@ public static class SecurityHelper
         var base64 = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         // URL에 영향이 가는 특수문자 변경
         return base64.Replace('+', '-').Replace('/', '_').TrimEnd('=');
+    }
+
+    // 토큰 해싱 (SHA256)
+    public static string HashToken(string token)
+    {
+        using var sha256 = SHA256.Create();
+        var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(token));
+        return Convert.ToBase64String(hashBytes);
     }
 }

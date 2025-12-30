@@ -88,10 +88,13 @@ public class EmailServiceTests : IDisposable
                 It.IsAny<Func<It.IsAnyType, Exception?, string>>()), // 포맷 함수도 어떤 것이든 상관없음
             Times.AtLeastOnce); // 최소 한 번 이상 호출되었는지 확인
     }
+    #endregion
 
-    // null 이메일도 SEND_ACTUAL_EMAIL=false면 예외 없이 처리
+    #region SendPasswordResetLinkAsync Tests
+
+    // SEND_ACTUAL_EMAIL=false일 때 비밀번호 재설정 링크 메일은 로그만 출력
     [Fact]
-    public async Task SendVerificationLinkAsync_WithNullEmail_WhenSendActualEmailIsFalse_ShouldNotThrow()
+    public async Task SendPasswordResetLinkAsync_WhenSendActualEmailIsFalse_ShouldLogOnly()
     {
         // Arrange
         Environment.SetEnvironmentVariable("SMTP_HOST", "smtp.test.com");
@@ -102,10 +105,10 @@ public class EmailServiceTests : IDisposable
         Environment.SetEnvironmentVariable("API_URL", "http://localhost:5000");
         var emailService = new EmailService(_loggerMock.Object);
 
-        // Act & Assert
-        await emailService.SendVerificationLinkAsync(null!, "test-token-123");
+        // Act
+        await emailService.SendPasswordResetLinkAsync("test@test.com", "reset-token-123");
 
-        // 로그만 출력되었는지 확인
+        // Assert
         _loggerMock.Verify(
             x => x.Log(
                 LogLevel.Information,
@@ -115,60 +118,5 @@ public class EmailServiceTests : IDisposable
                 It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
             Times.AtLeastOnce);
     }
-
-    // 빈 이메일도 SEND_ACTUAL_EMAIL=false면 예외 없이 처리
-    [Fact]
-    public async Task SendVerificationLinkAsync_WithEmptyEmail_WhenSendActualEmailIsFalse_ShouldNotThrow()
-    {
-        // Arrange
-        Environment.SetEnvironmentVariable("SMTP_HOST", "smtp.test.com");
-        Environment.SetEnvironmentVariable("SMTP_PORT", "587");
-        Environment.SetEnvironmentVariable("SMTP_USERNAME", "test-user");
-        Environment.SetEnvironmentVariable("SMTP_PASSWORD", "test-pass");
-        Environment.SetEnvironmentVariable("SEND_ACTUAL_EMAIL", "false");
-        Environment.SetEnvironmentVariable("API_URL", "http://localhost:5000");
-        var emailService = new EmailService(_loggerMock.Object);
-
-        // Act & Assert
-        await emailService.SendVerificationLinkAsync("", "test-token-123");
-
-        // 로그만 출력되었는지 확인
-        _loggerMock.Verify(
-            x => x.Log(
-                LogLevel.Information,
-                It.IsAny<EventId>(),
-                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("DEV MODE")),
-                It.IsAny<Exception>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.AtLeastOnce);
-    }
-
-    // 잘못된 형식의 이메일도 SEND_ACTUAL_EMAIL=false면 예외 없이 처리
-    [Fact]
-    public async Task SendVerificationLinkAsync_WithInvalidEmailFormat_WhenSendActualEmailIsFalse_ShouldNotThrow()
-    {
-        // Arrange
-        Environment.SetEnvironmentVariable("SMTP_HOST", "smtp.test.com");
-        Environment.SetEnvironmentVariable("SMTP_PORT", "587");
-        Environment.SetEnvironmentVariable("SMTP_USERNAME", "test-user");
-        Environment.SetEnvironmentVariable("SMTP_PASSWORD", "test-pass");
-        Environment.SetEnvironmentVariable("SEND_ACTUAL_EMAIL", "false");
-        Environment.SetEnvironmentVariable("API_URL", "http://localhost:5000");
-        var emailService = new EmailService(_loggerMock.Object);
-
-        // Act & Assert
-        await emailService.SendVerificationLinkAsync("invalid-email-format", "test-token-123");
-
-        // 로그만 출력되었는지 확인
-        _loggerMock.Verify(
-            x => x.Log(
-                LogLevel.Information,
-                It.IsAny<EventId>(),
-                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("DEV MODE")),
-                It.IsAny<Exception>(),
-                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
-            Times.AtLeastOnce);
-    }
-
     #endregion
 }

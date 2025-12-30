@@ -73,8 +73,8 @@ public class AuthService : IAuthService
         if (existingUser != null)
         {
             // 미인증 계정이고 만료된 경우 삭제
-            if (!existingUser.Verified && existingUser.EmailVerificationExpiry.HasValue &&
-                existingUser.EmailVerificationExpiry.Value < DateTime.UtcNow)
+            if (!existingUser.Verified && existingUser.EmailVerificationTokenExpiredAt.HasValue &&
+                existingUser.EmailVerificationTokenExpiredAt.Value < DateTime.UtcNow)
             {
                 _context.Users.Remove(existingUser);
                 await _context.SaveChangesAsync();
@@ -115,7 +115,7 @@ public class AuthService : IAuthService
             Phone = request.Phone,
             Verified = false, // 초기값은 미인증
             EmailVerificationToken = verificationToken,
-            EmailVerificationExpiry = verificationExpiry,
+            EmailVerificationTokenExpiredAt = verificationExpiry,
             Rating = 0.0,
             TermsOfServiceAgreed = request.TermsOfServiceAgreed,
             PrivacyPolicyAgreed = request.PrivacyPolicyAgreed,
@@ -163,14 +163,14 @@ public class AuthService : IAuthService
         var user = await _context.Users
             .FirstOrDefaultAsync(u => u.EmailVerificationToken == token &&
                                       u.Verified == false &&
-                                      u.EmailVerificationExpiry > DateTime.UtcNow);
+                                      u.EmailVerificationTokenExpiredAt > DateTime.UtcNow);
         
         if (user == null) throw new InvalidOperationException("Invalid or expired verification link");
 
         // 사용자 인증 완료
         user.Verified = true;
         user.EmailVerificationToken = null; // 토큰 재사용 방지
-        user.EmailVerificationExpiry = null;
+        user.EmailVerificationTokenExpiredAt = null;
         user.UpdatedAt = DateTime.UtcNow;
 
         await _context.SaveChangesAsync();
@@ -270,11 +270,11 @@ public class AuthService : IAuthService
 
             // 인증 토큰이 만료되었거나 없으면 새로 생성
             if (string.IsNullOrEmpty(user.EmailVerificationToken) ||
-                !user.EmailVerificationExpiry.HasValue ||
-                user.EmailVerificationExpiry.Value < DateTime.UtcNow)
+                !user.EmailVerificationTokenExpiredAt.HasValue ||
+                user.EmailVerificationTokenExpiredAt.Value < DateTime.UtcNow)
             {
                 user.EmailVerificationToken = SecurityHelper.GenerateVerificationToken();
-                user.EmailVerificationExpiry = DateTime.UtcNow.AddHours(24);
+                user.EmailVerificationTokenExpiredAt = DateTime.UtcNow.AddHours(24);
                 await _context.SaveChangesAsync();
                 shouldSendEmail = true;
             }
@@ -349,6 +349,216 @@ public class AuthService : IAuthService
         return true;
     }
 
+    public async Task<ForgotPasswordResponse> SendPasswordResetEmailAsync(string email, string? captchaToken = null)
+    {
+        // 일일 제한 체크 (24시간에 5번)
+        var dailyRateLimitKey = $"password_reset_daily:{email}";
+        var dailyAttemptCount = await _redisService.IncrementAsync(dailyRateLimitKey, TimeSpan.FromHours(24));
+        if (dailyAttemptCount > 5)
+        {
+            _logger.LogWarning("Daily password reset rate limit exceeded: {Email} (Attempt {Count})", email, dailyAttemptCount);
+            throw new RateLimitException("Too many password reset attempts. Please try again in 24 hours.", 86400);
+        }
+
+        // 시간당 제한 체크 (1시간에 3번)
+        var hourlyRateLimitKey = $"password_reset_hourly:{email}";
+        var hourlyAttemptCount = await _redisService.IncrementAsync(hourlyRateLimitKey, TimeSpan.FromHours(1));
+        if (hourlyAttemptCount > 3)
+        {
+            _logger.LogWarning("Hourly password reset rate limit exceeded: {Email} (Attempt {Count})", email, hourlyAttemptCount);
+            throw new RateLimitException("Too many password reset attempts. Please try again in 1 hour.", 3600);
+        }
+
+        // 3번째 시도부터 CAPTCHA 필수
+        if (hourlyAttemptCount >= 3)
+        {
+            if (string.IsNullOrEmpty(captchaToken))
+            {
+                _logger.LogWarning("CAPTCHA required but not provided: {Email} (Attempt {Count})", email, hourlyAttemptCount);
+                throw new InvalidOperationException("CAPTCHA verification is required");
+            }
+
+            var isCaptchaValid = await _captchaService.VerifyTurnstileTokenAsync(captchaToken);
+            if (!isCaptchaValid)
+            {
+                _logger.LogWarning("CAPTCHA verification failed: {Email}", email);
+                throw new InvalidOperationException("CAPTCHA verification failed");
+            }
+
+            _logger.LogInformation("CAPTCHA verification successful: {Email}", email);
+        }
+
+        email = email.ToLower();
+
+        // 이메일로 사용자 조회
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+        if (user != null)
+        {
+            // 차단된 사용자 체크
+            var blockedUser = await _context.BlockedUsers
+                .FirstOrDefaultAsync(bu =>
+                    (bu.UserId == user.Id || bu.Email == user.Email) &&
+                    (bu.ExpiresAt == null || bu.ExpiresAt > DateTime.UtcNow));
+
+            if (blockedUser != null)
+            {
+                var reason = string.IsNullOrEmpty(blockedUser.Reason)
+                    ? "This account has been blocked"
+                    : blockedUser.Reason;
+
+                if (blockedUser.ExpiresAt.HasValue)
+                    reason += $". Access will be restored at {blockedUser.ExpiresAt.Value:yyyy-MM-dd HH:mm:ss} UTC";
+
+                _logger.LogWarning("Password reset blocked for user: {Email}, Reason: {Reason}", email, reason);
+
+                // 보안: 차단된 경우에도 동일한 응답 반환 (차단 여부 노출 방지)
+                await Task.Delay(Random.Shared.Next(100, 300));
+
+                return new ForgotPasswordResponse
+                {
+                    Success = true,
+                    Message = "Password reset email sent successfully."
+                };
+            }
+
+            // 비밀번호 재설정 토큰 생성 및 저장
+            var resetToken = SecurityHelper.GenerateVerificationToken(); // 평문 토큰 (이메일 전송용)
+            var hashedToken = SecurityHelper.HashToken(resetToken); // 해시된 토큰 (DB 저장용)
+
+            user.PasswordResetToken = hashedToken; // 해시된 토큰을 DB에 저장
+            user.PasswordResetTokenExpiredAt = DateTime.UtcNow.AddHours(24); // 24시간으로 변경
+            user.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            // 이메일 전송 (평문 토큰 사용)
+            await _emailService.SendPasswordResetLinkAsync(email, resetToken);
+
+            _logger.LogInformation("Password reset email sent: {Email} (Hourly: {Hourly}/3, Daily: {Daily}/5)",
+                email, hourlyAttemptCount, dailyAttemptCount);
+        }
+        else
+        {
+            _logger.LogWarning("Password reset requested for non-existent email: {Email}", email);
+
+            // 타이밍 공격 방지를 위해 동일한 시간 소요
+            await Task.Delay(Random.Shared.Next(100, 300));
+        }
+
+        // Redis에 이메일 및 마지막 전송 시간 저장
+        var lastSentKey = $"password_reset_last_sent:{email}";
+        await _redisService.SetAsync<string>(lastSentKey, DateTime.UtcNow.ToString("O"), TimeSpan.FromSeconds(60));
+
+        return new ForgotPasswordResponse
+        {
+            Success = true,
+            Message = "Password reset email sent successfully.",
+        };
+    }
+
+    // 비밀번호 재설정 토큰 검증
+    public async Task<VerifyResetTokenResponse> VerifyPasswordResetTokenAsync(string resetToken)
+    {
+        _logger.LogInformation("Verifying password reset token");
+
+        // 받은 토큰을 해싱
+        var hashedToken = SecurityHelper.HashToken(resetToken);
+
+        // 해싱된 토큰으로 사용자 찾기
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.PasswordResetToken == hashedToken && u.DeletedAt == null);
+
+        if (user == null)
+        {
+            _logger.LogWarning("Password reset token not found or user deleted");
+            throw new InvalidOperationException("Invalid or expired reset link");
+        }
+
+        // 토큰 만료 여부 확인
+        if (user.PasswordResetTokenExpiredAt == null || user.PasswordResetTokenExpiredAt < DateTime.UtcNow)
+        {
+            _logger.LogWarning("Password reset token expired for user: {Email}", user.Email);
+            throw new InvalidOperationException("Invalid or expired reset link");
+        }
+
+        _logger.LogInformation("Password reset token verified for user: {Email}", user.Email);
+
+        return new VerifyResetTokenResponse
+        {
+            Success = true,
+            Message = "Valid reset token",
+            Email = user.Email
+        };
+    }
+
+    // 비밀번호 재설정
+    public async Task<ResetPasswordResponse> ResetPasswordAsync(string resetToken, string newPassword)
+    {
+        _logger.LogInformation("Resetting password with token");
+
+        // 받은 토큰을 해싱
+        var hashedToken = SecurityHelper.HashToken(resetToken);
+
+        // 해싱된 토큰으로 사용자 찾기
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.PasswordResetToken == hashedToken && u.DeletedAt == null);
+
+        if (user == null)
+        {
+            _logger.LogWarning("Password reset token not found or user deleted");
+            throw new InvalidOperationException("Invalid or expired reset link");
+        }
+
+        // 토큰 만료 여부 확인
+        if (user.PasswordResetTokenExpiredAt == null || user.PasswordResetTokenExpiredAt < DateTime.UtcNow)
+        {
+            _logger.LogWarning("Password reset token expired for user: {Email}", user.Email);
+            throw new InvalidOperationException("Invalid or expired reset link");
+        }
+
+        // 차단된 사용자 확인
+        var blockedUser = await _context.BlockedUsers
+            .FirstOrDefaultAsync(b => b.UserId == user.Id &&
+                                      (b.ExpiresAt == null || b.ExpiresAt > DateTime.UtcNow));
+
+        if (blockedUser != null)
+        {
+            _logger.LogWarning("Blocked user attempted to reset password: {Email}", user.Email);
+            throw new InvalidOperationException("Your account has been blocked. Please contact support.");
+        }
+
+        // 새 비밀번호 해싱
+        var hashedPassword = BCrypt.Net.BCrypt.HashPassword(newPassword);
+
+        // 비밀번호 업데이트 및 토큰 무효화
+        user.Password = hashedPassword;
+        user.PasswordResetToken = null;
+        user.PasswordResetTokenExpiredAt = null;
+        user.UpdatedAt = DateTime.UtcNow;
+
+        // 보안: 모든 기존 세션(refresh token) 무효화
+        var existingRefreshTokens = await _context.RefreshTokens
+            .Where(rt => rt.UserId == user.Id)
+            .ToListAsync();
+
+        if (existingRefreshTokens.Any())
+        {
+            _context.RefreshTokens.RemoveRange(existingRefreshTokens);
+            _logger.LogInformation("Revoked {Count} existing refresh tokens for user: {Email}",
+                existingRefreshTokens.Count, user.Email);
+        }
+
+        await _context.SaveChangesAsync();
+
+        _logger.LogInformation("Password reset successfully for user: {Email}", user.Email);
+
+        return new ResetPasswordResponse
+        {
+            Success = true,
+            Message = "Password has been reset successfully. You can now log in with your new password."
+        };
+    }
+
     // 토큰 갱신
     public async Task<AuthResponse> RefreshAccessTokenAsync(string refreshToken)
     {
@@ -377,7 +587,7 @@ public class AuthService : IAuthService
         var user = await _context.Users
             .FirstOrDefaultAsync(u => u.EmailVerificationToken == verificationToken &&
                                       u.Verified == false &&
-                                      u.EmailVerificationExpiry > DateTime.UtcNow);
+                                      u.EmailVerificationTokenExpiredAt > DateTime.UtcNow);
 
         // 토큰 검증 실패
         if (user == null)
@@ -418,7 +628,7 @@ public class AuthService : IAuthService
         var user = await _context.Users
             .FirstOrDefaultAsync(u => u.EmailVerificationToken == verificationToken &&
                                       u.Verified == false &&
-                                      u.EmailVerificationExpiry > DateTime.UtcNow);
+                                      u.EmailVerificationTokenExpiredAt > DateTime.UtcNow);
 
         // 토큰 검증 실패
         if (user == null)
@@ -449,7 +659,7 @@ public class AuthService : IAuthService
             if (string.IsNullOrEmpty(captchaToken))
             {
                 _logger.LogWarning("CAPTCHA required but not provided: {Email} (Attempt {Count})", user.Email, hourlyAttemptCount);
-                throw new InvalidOperationException("CAPTCHA verification is required after 3 attempts");
+                throw new InvalidOperationException("CAPTCHA verification is required");
             }
 
             var isCaptchaValid = await _captchaService.VerifyTurnstileTokenAsync(captchaToken);
@@ -464,7 +674,7 @@ public class AuthService : IAuthService
 
         // 만료 시간 연장 (24시간)
         // 토큰은 변경하지 않음
-        user.EmailVerificationExpiry = DateTime.UtcNow.AddHours(24);
+        user.EmailVerificationTokenExpiredAt = DateTime.UtcNow.AddHours(24);
         user.UpdatedAt = DateTime.UtcNow;
 
         await _context.SaveChangesAsync();

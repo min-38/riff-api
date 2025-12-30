@@ -184,6 +184,16 @@ public class EmailService : IEmailService
         var apiUrl = Environment.GetEnvironmentVariable("API_URL") ?? "http://localhost:5000";
         var verificationUrl = $"{apiUrl}/auth/verify-email/{verificationToken}";
 
+        // DEV MODE에서 링크를 쉽게 복사할 수 있도록 로그 출력
+        var sendActualEmail = bool.TryParse(Environment.GetEnvironmentVariable("SEND_ACTUAL_EMAIL"), out var result) && result;
+        if (!sendActualEmail)
+        {
+            _logger.LogInformation("=== [DEV MODE] Email Verification Link ===");
+            _logger.LogInformation("To: {Email}", toEmail);
+            _logger.LogInformation("Verification URL: {Url}", verificationUrl);
+            _logger.LogInformation("==========================================");
+        }
+
         // 템플릿 생성
         var template = new VerificationLinkEmailTemplate(verificationUrl);
 
@@ -193,10 +203,28 @@ public class EmailService : IEmailService
         _logger.LogInformation("Verification link sent to {Email}", toEmail);
     }
 
-    // TODO: 비밀번호 재설정 이메일 발송
-    public async Task SendPasswordResetEmailAsync(string toEmail, string resetToken)
+    // 비밀번호 재설정 이메일 발송
+    public async Task SendPasswordResetLinkAsync(string toEmail, string resetToken)
     {
-        _logger.LogInformation("Password reset email would be sent to {Email}", toEmail);
-        await Task.CompletedTask;
+        var apiUrl = Environment.GetEnvironmentVariable("API_URL") ?? "http://localhost:5000";
+        var resetUrl = $"{apiUrl}/auth/reset-password/{resetToken}";
+
+        // DEV MODE에서 링크를 쉽게 복사할 수 있도록 로그 출력
+        var sendActualEmail = bool.TryParse(Environment.GetEnvironmentVariable("SEND_ACTUAL_EMAIL"), out var result) && result;
+        if (!sendActualEmail)
+        {
+            _logger.LogInformation("=== [DEV MODE] Password Reset Link ===");
+            _logger.LogInformation("To: {Email}", toEmail);
+            _logger.LogInformation("Reset URL: {Url}", resetUrl);
+            _logger.LogInformation("======================================");
+        }
+
+        // 템플릿 생성
+        var template = new ResetPasswordLinkEmailTemplate(resetUrl);
+
+        // 이메일 전송
+        await SendEmailAsync(toEmail, template);
+
+        _logger.LogInformation("Password reset email sent to {Email}", toEmail);
     }
 }

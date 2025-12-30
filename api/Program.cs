@@ -80,6 +80,15 @@ builder.Services.AddHttpClient();
 
 // background 서비스 등록
 builder.Services.AddHostedService<UnverifiedAccountCleanupService>();
+builder.Services.AddHostedService<TokenCleanupService>();
+
+// HSTS (HTTP Strict Transport Security) 설정
+builder.Services.AddHsts(options =>
+{
+    options.Preload = true; // HSTS Preload 목록에 포함
+    options.IncludeSubDomains = true; // 서브도메인에도 적용
+    options.MaxAge = TimeSpan.FromDays(365); // 1년간 유지
+});
 
 // 프론트엔드 도메인에서의 CORS 허용 설정
 builder.Services.AddCors(options =>
@@ -108,14 +117,19 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-// 프론트엔드 도메인에서의 요청 허용
-app.UseCors("AllowFrontend");
-
-// 배포 환경에서만 HTTPS 리디렉션 사용
+// 배포 환경에서만 HTTPS 리디렉션 및 HSTS 사용
 if (!app.Environment.IsDevelopment())
 {
+    // HTTPS 리다이렉트 (HTTP -> HTTPS 자동 전환)
     app.UseHttpsRedirection();
+
+    // HSTS (HTTP Strict Transport Security)
+    // 브라우저에게 1년간 HTTPS만 사용하도록 강제
+    app.UseHsts();
 }
+
+// 프론트엔드 도메인에서의 요청 허용
+app.UseCors("AllowFrontend");
 
 // Map controllers
 app.MapControllers();

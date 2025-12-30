@@ -84,21 +84,23 @@ public partial class ApplicationDbContext : DbContext
             entity.ToTable("users");
 
             entity.Property(e => e.Id).HasDefaultValueSql("gen_random_uuid()").HasColumnName("id");
-            entity.Property(e => e.AvatarUrl).HasColumnName("avatarUrl");
-            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()").HasColumnName("createdAt");
-            entity.Property(e => e.DeletedAt).HasColumnName("deletedAt");
             entity.Property(e => e.Email).HasColumnName("email");
             entity.Property(e => e.Nickname).HasColumnName("nickname");
             entity.Property(e => e.Password).HasColumnName("password");
+            entity.Property(e => e.AvatarUrl).HasColumnName("avatar_url");
             entity.Property(e => e.Phone).HasColumnName("phone");
-            entity.Property(e => e.Rating).HasColumnName("rating");
-            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("now()").HasColumnName("updatedAt");
             entity.Property(e => e.Verified).HasColumnName("verified");
-            entity.Property(e => e.EmailVerificationToken).HasColumnName("emailVerificationToken");
-            entity.Property(e => e.EmailVerificationExpiry).HasColumnName("emailVerificationExpiry");
-            entity.Property(e => e.TermsOfServiceAgreed).HasColumnName("termsOfServiceAgreed");
-            entity.Property(e => e.PrivacyPolicyAgreed).HasColumnName("privacyPolicyAgreed");
-            entity.Property(e => e.MarketingAgreed).HasColumnName("marketingAgreed");
+            entity.Property(e => e.Rating).HasColumnName("rating");
+            entity.Property(e => e.EmailVerificationToken).HasColumnName("email_verification_token");
+            entity.Property(e => e.EmailVerificationTokenExpiredAt).HasColumnName("email_verification_token_expired_at");
+            entity.Property(e => e.PasswordResetToken).HasColumnName("password_reset_token");
+            entity.Property(e => e.PasswordResetTokenExpiredAt).HasColumnName("password_reset_token_expired_at");
+            entity.Property(e => e.TermsOfServiceAgreed).HasColumnName("terms_of_service_agreed");
+            entity.Property(e => e.PrivacyPolicyAgreed).HasColumnName("privacy_policy_agreed");
+            entity.Property(e => e.MarketingAgreed).HasColumnName("marketing_agreed");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()").HasColumnName("created_at");
+            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("now()").HasColumnName("updated_at");
+            entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
 
             // 인덱스 추가 (토큰 검색 성능 향상)
             entity.HasIndex(e => e.EmailVerificationToken);

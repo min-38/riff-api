@@ -6,7 +6,7 @@ namespace api.DTOs.Requests;
 public class RegisterRequest
 {
     [Required(ErrorMessage = "Email is required")]
-    [EmailAddress(ErrorMessage = "Invalid email format")]
+    [ValidEmail]
     public string Email { get; set; } = null!;
 
     [Required(ErrorMessage = "Password is required")]

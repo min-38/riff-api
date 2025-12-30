@@ -42,7 +42,13 @@ public partial class User
     public string? EmailVerificationToken { get; set; }
 
     // 이메일 인증 만료 시간
-    public DateTime? EmailVerificationExpiry { get; set; }
+    public DateTime? EmailVerificationTokenExpiredAt { get; set; }
+
+    // 비밀번호 재설정 토큰
+    public string? PasswordResetToken { get; set; }
+
+    // 비밀번호 재설정 토큰 만료 시간
+    public DateTime? PasswordResetTokenExpiredAt { get; set; }
 
     // 생성 시간
     public DateTime CreatedAt { get; set; }
