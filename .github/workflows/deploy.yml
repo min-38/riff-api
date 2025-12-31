@@ -14,7 +14,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run Tests
+        run: |
+          cd api
+          dotnet restore
+          dotnet test --no-restore
+
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
@@ -32,9 +43,11 @@ jobs:
             
             # 프로젝트 디렉토리로 이동
             cd /home/ubuntu/docker/riff
-            
-            # 최신 코드 가져오기
-            git pull origin develop
+
+            # 최신 코드 가져오기 (강제 동기화)
+            git fetch origin develop
+            git reset --hard origin/develop
+            git clean -fd
 
             # api 디렉토리로 이동
             cd ./api
@@ -53,7 +66,7 @@ jobs:
             sudo docker logs riff-api --tail 50
             
             # 헬스 체크
-            curl -f curl -f https://riff-api.oouya.xyz/health || exit 1
+            curl -f https://riff-api.oouya.xyz/health || exit 1
             
             echo "Deployment successful!"
           EOF
@@ -61,3 +74,19 @@ jobs:
       - name: Cleanup
         if: always()
         run: rm -f ~/.ssh/id_rsa
+
+      - name: Discord 배포 성공 알림
+        if: success()
+        run: |
+          COMMIT_MSG=$(echo "${{ github.event.head_commit.message }}" | head -n 1)
+          curl -H "Content-Type: application/json" \
+                -d "{\"content\":\"✅ 배포 성공: $COMMIT_MSG\"}" \
+                ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: Discord 배포 실패 알림
+        if: failure()
+        run: |
+          COMMIT_MSG=$(echo "${{ github.event.head_commit.message }}" | head -n 1)
+          curl -H "Content-Type: application/json" \
+                -d "{\"content\":\"❌ 배포 실패: $COMMIT_MSG\"}" \
+                ${{ secrets.DISCORD_WEBHOOK_URL }}
