@@ -1,6 +1,8 @@
 using DotNetEnv;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
+using Amazon.S3;
+using Amazon;
 using api.Data;
 using api.Services;
 using api.BackgroundServices;
@@ -36,6 +38,23 @@ var redisPassword = Environment.GetEnvironmentVariable("REDIS_PASSWORD");
 if (string.IsNullOrEmpty(redisHost))
     throw new InvalidOperationException("REDIS_HOST environment variable is required");
 
+// S3 환경 변수 검증
+var s3BucketName = Environment.GetEnvironmentVariable("S3_BUCKET_NAME");
+var s3EndpointUrl = Environment.GetEnvironmentVariable("S3_ENDPOINT_URL");
+var s3RegionName = Environment.GetEnvironmentVariable("S3_REGION_NAME");
+var s3AccessKey = Environment.GetEnvironmentVariable("S3_ACCESS_KEY");
+var s3SecretKey = Environment.GetEnvironmentVariable("S3_SECRET_KEY");
+if (string.IsNullOrEmpty(s3BucketName))
+    throw new InvalidOperationException("S3_BUCKET_NAME environment variable is required");
+if (string.IsNullOrEmpty(s3EndpointUrl))
+    throw new InvalidOperationException("S3_ENDPOINT_URL environment variable is required");
+if (string.IsNullOrEmpty(s3RegionName))
+    throw new InvalidOperationException("S3_REGION_NAME environment variable is required");
+if (string.IsNullOrEmpty(s3AccessKey))
+    throw new InvalidOperationException("S3_ACCESS_KEY environment variable is required");
+if (string.IsNullOrEmpty(s3SecretKey))
+    throw new InvalidOperationException("S3_SECRET_KEY environment variable is required");
+
 // JWT 환경 변수 검증
 var jwtSecretKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY");
 var jwtIssuer = Environment.GetEnvironmentVariable("JWT_ISSUER");
@@ -65,6 +84,58 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
     }
 
     return ConnectionMultiplexer.Connect(configuration);
+});
+
+// S3 연결 (Singleton으로 등록)
+builder.Services.AddSingleton<IAmazonS3>(sp =>
+{
+    var config = new AmazonS3Config
+    {
+        ServiceURL = s3EndpointUrl,
+        ForcePathStyle = true,
+        UseAccelerateEndpoint = false,
+        UseDualstackEndpoint = false,
+        AuthenticationRegion = s3RegionName,
+        MaxErrorRetry = 3,
+        Timeout = TimeSpan.FromSeconds(30),
+    };
+
+    var credentials = new Amazon.Runtime.BasicAWSCredentials(s3AccessKey, s3SecretKey);
+    var s3Client = new AmazonS3Client(credentials, config);
+
+    // 연결 테스트 (특정 버킷만 확인)
+    try
+    {
+        // ListBuckets 대신 GetBucketLocation 사용
+        var locationTask = s3Client.GetBucketLocationAsync(s3BucketName);
+        locationTask.Wait();
+
+        var location = locationTask.Result.Location;
+        Console.WriteLine($"S3 connection successful: bucket '{s3BucketName}' exists (region: {location})");
+    }
+    catch (AggregateException ae) when (ae.InnerException is Amazon.S3.AmazonS3Exception s3Ex)
+    {
+        // 404 에러 = 버킷 없음
+        if (s3Ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            throw new InvalidOperationException($"S3 bucket '{s3BucketName}' does not exist", s3Ex);
+        }
+        
+        // 403 에러 = 권한 없음
+        if (s3Ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new InvalidOperationException($"No permission to access S3 bucket '{s3BucketName}'", s3Ex);
+        }
+
+        throw new InvalidOperationException($"Failed to connect to S3: {s3Ex.Message}", s3Ex);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Unexpected error: {ex.Message}");
+        throw new InvalidOperationException($"Failed to connect to S3: {ex.Message}", ex);
+    }
+
+    return s3Client;
 });
 
 // Register custom services
@@ -134,7 +205,7 @@ app.UseCors("AllowFrontend");
 // Map controllers
 app.MapControllers();
 
-app.MapGet("/health", async (ApplicationDbContext db, IConnectionMultiplexer redis) =>
+app.MapGet("/health", async (ApplicationDbContext db, IConnectionMultiplexer redis, IAmazonS3 s3) =>
 {
     var healthStatus = new
     {
@@ -178,6 +249,13 @@ app.MapGet("/health", async (ApplicationDbContext db, IConnectionMultiplexer red
             });
             isHealthy = false;
         }
+
+        // S3 check (이미 서버 시작 시 연결 테스트 완료)
+        healthStatus.checks.Add("s3", new
+        {
+            status = "healthy",
+            message = $"S3 bucket '{s3BucketName}' connected (verified at startup)"
+        });
 
         if (!isHealthy)
             return Results.Json(
