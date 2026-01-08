@@ -1,7 +1,3 @@
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.EntityFrameworkCore;
 using api.Data;
 using api.Models;
@@ -9,7 +5,6 @@ using api.DTOs.Requests;
 using api.DTOs.Responses;
 using api.Exceptions;
 using api.Utils;
-using BCrypt.Net;
 
 namespace api.Services;
 
@@ -17,7 +12,6 @@ public class AuthService : IAuthService
 {
     private readonly ApplicationDbContext _context;
     private readonly ILogger<AuthService> _logger;
-    private readonly IConfiguration _configuration;
     private readonly IUserService _userService;
     private readonly IEmailService _emailService;
     private readonly ITokenService _tokenService;
@@ -28,7 +22,6 @@ public class AuthService : IAuthService
     (
         ApplicationDbContext context,
         ILogger<AuthService> logger,
-        IConfiguration configuration,
         IUserService userService,
         IEmailService emailService,
         ITokenService tokenService,
@@ -38,7 +31,6 @@ public class AuthService : IAuthService
     {
         _context = context;
         _logger = logger;
-        _configuration = configuration;
         _userService = userService;
         _emailService = emailService;
         _tokenService = tokenService;

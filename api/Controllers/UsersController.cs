@@ -6,7 +6,7 @@ using api.Services;
 namespace api.Controllers;
 
 [ApiController]
-[Route("[controller]")]
+[Route("users")]
 public class UsersController : ControllerBase
 {
     private readonly ApplicationDbContext _context;

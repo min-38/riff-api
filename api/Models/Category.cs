@@ -21,5 +21,5 @@ public partial class Category
     // 수정 시간
     public DateTime UpdatedAt { get; set; }
 
-    public virtual ICollection<Gear> Gears { get; set; } = new List<Gear>();
+    public virtual ICollection<TradeGear> Gears { get; set; } = new List<TradeGear>();
 }

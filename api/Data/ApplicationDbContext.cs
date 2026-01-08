@@ -1,7 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using api.Models;
+using api.Models.Enums;
 
 namespace api.Data;
 
@@ -22,14 +25,20 @@ public partial class ApplicationDbContext : DbContext
 
     public virtual DbSet<RefreshToken> RefreshTokens { get; set; }
     public virtual DbSet<Category> Categories { get; set; }
-    public virtual DbSet<Gear> Gears { get; set; }
+    public virtual DbSet<TradeGear> TradeGears { get; set; }
+    public virtual DbSet<TradeGearView> TradeGearViews { get; set; }
+    public virtual DbSet<TradeGearLike> TradeGearLikes { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder
-            .HasPostgresEnum("gear_condition", new[] { "NEW", "LIKE_NEW", "GOOD", "FAIR", "POOR" })
-            .HasPostgresEnum("gear_status", new[] { "AVAILABLE", "RESERVED", "SOLD", "HIDDEN" })
-            .HasPostgresEnum("transaction_preference", new[] { "DIRECT", "DELIVERY", "BOTH" })
+            .HasPostgresEnum<GearCategory>("gear_category")
+            .HasPostgresEnum<GearSubCategory>("gear_sub_category")
+            .HasPostgresEnum<GearDetailCategory>("gear_detail_category")
+            .HasPostgresEnum<GearCondition>("gear_condition")
+            .HasPostgresEnum<GearStatus>("gear_status")
+            .HasPostgresEnum<TradeMethod>("trade_method")
+            .HasPostgresEnum<Region>("region_type")
             .HasPostgresExtension("uuid-ossp");
 
         modelBuilder.Entity<Category>(entity =>
@@ -42,40 +51,122 @@ public partial class ApplicationDbContext : DbContext
             entity.Property(e => e.Name).HasMaxLength(255).HasColumnName("name");
             entity.Property(e => e.Slug).HasMaxLength(255).HasColumnName("slug");
             entity.Property(e => e.UpdatedAt).HasDefaultValueSql("now()").HasColumnName("updated_at");
+
+            entity.Ignore(e => e.Gears);
         });
 
-        modelBuilder.Entity<Gear>(entity =>
+        modelBuilder.Entity<TradeGear>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("gear_pkey");
-            entity.ToTable("gears");
+            entity.HasKey(e => e.Id).HasName("trade_gears_pkey");
+            entity.ToTable("trade_gears");
 
             entity.Property(e => e.Id).HasColumnName("id");
-            entity.Property(e => e.CategoryId).HasColumnName("category_id");
-            entity.Property(e => e.CreatedAt).HasDefaultValueSql("now()").HasColumnName("created_at");
-            entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
+            entity.Property(e => e.Title).HasMaxLength(100).HasColumnName("title");
             entity.Property(e => e.Description).HasColumnName("description");
-            entity.Property(e => e.Images).HasColumnName("images");
-            entity.Property(e => e.Location).HasMaxLength(255).HasColumnName("location");
-            entity.Property(e => e.Model).HasMaxLength(255).HasColumnName("model");
             entity.Property(e => e.Price).HasColumnName("price");
-            entity.Property(e => e.SellerId).HasColumnName("seller_id");
-            entity.Property(e => e.Title).HasMaxLength(255).HasColumnName("title");
-            entity.Property(e => e.UpdatedAt).HasDefaultValueSql("now()").HasColumnName("updated_at");
-            entity.Property(e => e.Views).HasColumnName("views");
-            entity.Property(e => e.Year).HasColumnName("year");
-            entity.Property(e => e.Condition).HasColumnName("condition");
-            entity.Property(e => e.Status).HasColumnName("status");
-            entity.Property(e => e.TransactionPreference).HasColumnName("transaction_preference");
+            entity.Property(e => e.Category).HasColumnName("category")
+                .HasColumnType("gear_category");
+            entity.Property(e => e.SubCategory).HasColumnName("sub_category")
+                .HasColumnType("gear_sub_category");
+            entity.Property(e => e.DetailCategory).HasColumnName("detail_category")
+                .HasColumnType("gear_detail_category");
+            entity.Property(e => e.Condition).HasColumnName("condition")
+                .HasColumnType("gear_condition");
+            entity.Property(e => e.TradeMethod).HasColumnName("trade_method")
+                .HasColumnType("trade_method");
+            entity.Property(e => e.Region).HasColumnName("region")
+                .HasColumnType("region_type");
+            entity.Property(e => e.Status).HasColumnName("status")
+                .HasColumnType("gear_status")
+                .HasDefaultValue(Models.Enums.GearStatus.Selling);
 
-            entity.HasOne(d => d.Category).WithMany(p => p.Gears)
-                .HasForeignKey(d => d.CategoryId)
-                .OnDelete(DeleteBehavior.Restrict)
-                .HasConstraintName("fk_gear_category");
+            // ImageData를 JSON으로 변환
+            var imageDataConverter = new ValueConverter<ImageData?, string?>(
+                v => v == null ? null : JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
+                v => v == null ? null : JsonSerializer.Deserialize<ImageData>(v, (JsonSerializerOptions?)null)
+            );
 
-            entity.HasOne(d => d.Seller).WithMany(p => p.Gears)
-                .HasForeignKey(d => d.SellerId)
+            entity.Property(e => e.Images)
+                .HasColumnName("images")
+                .HasColumnType("jsonb")
+                .HasConversion(imageDataConverter);
+            entity.Property(e => e.ViewCount).HasColumnName("view_count")
+                .HasDefaultValue(0);
+            entity.Property(e => e.LikeCount).HasColumnName("like_count")
+                .HasDefaultValue(0);
+            entity.Property(e => e.ChatCount).HasColumnName("chat_count")
+                .HasDefaultValue(0);
+            entity.Property(e => e.AuthorId).HasColumnName("author_id");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.UpdatedAt).HasColumnName("updated_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.DeletedAt).HasColumnName("deleted_at");
+
+            entity.HasOne(d => d.Author)
+                .WithMany(p => p.Gears)
+                .HasForeignKey(d => d.AuthorId)
                 .OnDelete(DeleteBehavior.Restrict)
-                .HasConstraintName("fk_gear_seller");
+                .HasConstraintName("fk_trade_gears_author");
+        });
+
+        modelBuilder.Entity<TradeGearView>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("trade_gear_views_pkey");
+            entity.ToTable("trade_gear_views");
+
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.GearId).HasColumnName("gear_id");
+            entity.Property(e => e.UserId).HasColumnName("user_id");
+            entity.Property(e => e.IpAddress).HasColumnName("ip_address");
+            entity.Property(e => e.ViewedAt).HasColumnName("viewed_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+            entity.HasOne(d => d.TradeGear)
+                .WithMany()
+                .HasForeignKey(d => d.GearId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_views_gear");
+
+            entity.HasOne(d => d.User)
+                .WithMany()
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.SetNull)
+                .HasConstraintName("fk_views_user");
+        });
+
+        modelBuilder.Entity<TradeGearLike>(entity =>
+        {
+            entity.HasKey(e => e.Id).HasName("trade_gear_likes_pkey");
+            entity.ToTable("trade_gear_likes");
+
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.GearId).HasColumnName("gear_id");
+            entity.Property(e => e.UserId).HasColumnName("user_id");
+            entity.Property(e => e.CreatedAt).HasColumnName("created_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP")
+                .IsRequired();
+
+            entity.HasOne(d => d.TradeGear)
+                .WithMany()
+                .HasForeignKey(d => d.GearId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_likes_gear");
+
+            entity.HasOne(d => d.User)
+                .WithMany()
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_likes_user");
+
+            // 한 사용자는 한 게시글에 한 번만 좋아요 가능
+            entity.HasIndex(e => new { e.GearId, e.UserId })
+                .IsUnique()
+                .HasDatabaseName("uk_gear_user");
+
+            // 인덱스
+            entity.HasIndex(e => e.GearId).HasDatabaseName("idx_gear_likes_gear");
+            entity.HasIndex(e => e.UserId).HasDatabaseName("idx_gear_likes_user");
         });
 
         modelBuilder.Entity<User>(entity =>

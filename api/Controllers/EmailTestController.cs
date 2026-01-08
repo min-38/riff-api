@@ -5,7 +5,7 @@ using api.Filters;
 namespace api.Controllers;
 
 [ApiController]
-[Route("[controller]")]
+[Route("email-test")]
 [DevelopmentOnly]
 public class EmailTestController : ControllerBase
 {

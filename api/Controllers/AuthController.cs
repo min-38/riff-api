@@ -7,7 +7,7 @@ using api.Exceptions;
 namespace api.Controllers;
 
 [ApiController]
-[Route("[controller]")]
+[Route("auth")]
 public class AuthController : ControllerBase
 {
     private readonly IAuthService _authService;

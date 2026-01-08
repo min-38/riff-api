@@ -18,7 +18,6 @@ AuthService 통합 테스트
 public class AuthServiceIntegrationTests : IDisposable
 {
     private readonly Mock<ILogger<AuthService>> _loggerMock;
-    private readonly Mock<IConfiguration> _configurationMock;
     private readonly Mock<IUserService> _userServiceMock;
     private readonly Mock<IEmailService> _emailServiceMock;
     private readonly Mock<ITokenService> _tokenServiceMock;
@@ -30,7 +29,6 @@ public class AuthServiceIntegrationTests : IDisposable
     public AuthServiceIntegrationTests()
     {
         _loggerMock = new Mock<ILogger<AuthService>>();
-        _configurationMock = new Mock<IConfiguration>();
         _userServiceMock = new Mock<IUserService>();
         _emailServiceMock = new Mock<IEmailService>();
         _tokenServiceMock = new Mock<ITokenService>();
@@ -48,7 +46,6 @@ public class AuthServiceIntegrationTests : IDisposable
         _authService = new AuthService(
             _context,
             _loggerMock.Object,
-            _configurationMock.Object,
             _userServiceMock.Object,
             _emailServiceMock.Object,
             _tokenServiceMock.Object,

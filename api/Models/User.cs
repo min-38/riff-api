@@ -59,6 +59,6 @@ public partial class User
     // 삭제 시간
     public DateTime? DeletedAt { get; set; }
 
-    public virtual ICollection<Gear> Gears { get; set; } = new List<Gear>();
+    public virtual ICollection<TradeGear> Gears { get; set; } = new List<TradeGear>();
     public virtual ICollection<UserOAuth> UserOAuths { get; set; } = new List<UserOAuth>();
 }
